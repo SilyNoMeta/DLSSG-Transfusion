@@ -658,24 +658,24 @@ void InitLogging(HINSTANCE instance, const std::wstring& exeDir)
     GetModuleFileNameW(instance, modPath, MAX_PATH);
     const std::wstring modDir = ParentPath(modPath);
 
-    std::wstring logPath = JoinPath(modDir, L"RTX40MFG.log");
+    std::wstring logPath = JoinPath(modDir, L"DLSSG-Transfusion.log");
     gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
     if (!gLog)
     {
-        logPath = JoinPath(exeDir, L"RTX40MFG.log");
+        logPath = JoinPath(exeDir, L"DLSSG-Transfusion.log");
         gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
     }
     if (!gLog)
     {
         wchar_t tempDir[MAX_PATH]{};
         GetTempPathW(MAX_PATH, tempDir);
-        logPath = JoinPath(tempDir, L"RTX40MFG.log");
+        logPath = JoinPath(tempDir, L"DLSSG-Transfusion.log");
         gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
     }
     gLogReady.store(gLog != nullptr, std::memory_order_release);
 
     Log(L"============================================================");
-    Log(L"RTX40MFG-Unlock (General-Use Proxy & Multi-Game Edition)");
+    Log(L"DLSSG-Transfusion (Universal Blackwell Transfusion & Multi-Game Edition)");
     Log(L"Loaded as: %s", proxy::GetCurrentTypeName());
     if (proxy::GetCurrentType() != proxy::ProxyType::None)
         Log(L"Proxied system DLL: %s", proxy::GetOriginalLibraryPath());
@@ -978,6 +978,7 @@ std::wstring ResolveConfigPath(HMODULE instance, const std::wstring& executableD
 
     // List of candidate config filenames in order of preference
     const wchar_t* candidateNames[] = {
+        L"DLSSG-Transfusion.json",
         L"RTX40MFG.json",
         L"RTX40MFG_config.json",
         L"config.json" // backwards compatibility fallback
@@ -1010,12 +1011,12 @@ std::wstring ResolveConfigPath(HMODULE instance, const std::wstring& executableD
             if (IsRegularFile(p))
                 return p;
         }
-        return JoinPath(cetDir, L"RTX40MFG.json");
+        return JoinPath(cetDir, L"DLSSG-Transfusion.json");
     }
 
-    // 4. Default: RTX40MFG.json next to module or executable
-    return moduleDir.empty() ? JoinPath(executableDirectory, L"RTX40MFG.json")
-                             : JoinPath(moduleDir, L"RTX40MFG.json");
+    // 4. Default: DLSSG-Transfusion.json next to module or executable
+    return moduleDir.empty() ? JoinPath(executableDirectory, L"DLSSG-Transfusion.json")
+                             : JoinPath(moduleDir, L"DLSSG-Transfusion.json");
 }
 
 uint64_t StoreControl(const ControlConfig& control)
@@ -3058,7 +3059,7 @@ DWORD WINAPI PatchWorker(void* context)
         if (tempLength > 0 && tempLength < _countof(tempDirectory))
         {
             wchar_t logName[64]{};
-            swprintf_s(logName, L"RTX40MFG-%lu.log", static_cast<unsigned long>(pid));
+            swprintf_s(logName, L"DLSSG-Transfusion-%lu.log", static_cast<unsigned long>(pid));
             logPath = JoinPath(tempDirectory, logName);
             gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
         }
@@ -3079,7 +3080,7 @@ DWORD WINAPI PatchWorker(void* context)
     gConfigPath = ResolveConfigPath(static_cast<HMODULE>(context), executableDirectory);
     gStatusPath = JoinPath(ParentPath(gConfigPath), L"bridge_status.json");
     DeleteFileW(gStatusPath.c_str());
-    gPerfCsvPath = JoinPath(ParentPath(gConfigPath), L"RTX40MFG_perf.csv");
+    gPerfCsvPath = JoinPath(ParentPath(gConfigPath), L"DLSSG-Transfusion_perf.csv");
     const ControlConfig initialControl = ReadInitialControl();
     StoreControl(initialControl);
     midpoint_fix::SetBlackwellTransfusionEnabled(gConfigBlackwellTransfusion.load(std::memory_order_relaxed));

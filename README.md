@@ -1,8 +1,7 @@
-# RTX 40 MFG Unlock for Cyberpunk 2077
+# DLSSG-Transfusion: Universal Multi-Frame Generation Unlock
 
-Experimental Cyber Engine Tweaks mod providing fixed 2x through 6x and Dynamic
-DLSS Frame Generation controls on RTX 40 series GPUs. The 5x and 6x modes are
-especially experimental.
+Universal DLSS Multi-Frame Generation enabler (2x through 6x and Dynamic Mode) for
+NVIDIA RTX 40-Series (Ada Lovelace) GPUs with runtime **Blackwell Kernel Transfusion**.
 
 Dynamic defaults to a 4x ceiling. Its UI toggle allows experimental 5x and 6x.
 UI recomposition is requested only when matching HUDless and UI buffers are tagged.
@@ -12,7 +11,7 @@ Version 1.3 introduces Blackwell Kernel Transfusion, backporting Blackwell
 sm_120 branchless cadence scatter arithmetic to Ada Lovelace sm_89 at runtime to
 eliminate micro-stutter drift under capped refresh rates (e.g. 138 FPS cap + VSync).
 It also adds real-time frame telemetry (rolling FPS, jitter std-dev, 1% lows, and
-RTX40MFG_perf.csv output), crash hardening against D3D12 E_ABORT, and OptiScaler
+DLSSG-Transfusion_perf.csv output), crash hardening against D3D12 E_ABORT, and OptiScaler
 Flip Metering bypass.
 
 Version 1.2 added multi-game standalone proxy DLLs (`version.dll`, `dxgi.dll`, `winmm.dll`),
@@ -41,13 +40,13 @@ The mod can be used in **any game** with NVIDIA DLSS Frame Generation and Stream
    - `version.dll` (Recommended for most modern games and Unreal Engine 4/5)
    - `dxgi.dll` (For games initializing graphics early)
    - `winmm.dll` (Alternative proxy)
-   - `RTX40MFG.asi` (For games with ASI loaders)
+   - `DLSSG-Transfusion.asi` (For games with ASI loaders)
 2. Copy the DLL into the game executable directory.
 3. Use in-game hotkeys to switch multipliers on the fly:
    - `Ctrl + Alt + 2..6`: Fixed 2x through 6x multiplier
    - `Ctrl + Alt + PageUp` / `PageDown`: Increment / Decrement multiplier (Fixed Mode)
    - `Ctrl + Alt + D`: Toggle between Fixed Mode and Dynamic Mode
-4. Detailed diagnostic logs are written directly to `RTX40MFG.log` in the game directory.
+4. Detailed diagnostic logs are written directly to `DLSSG-Transfusion.log` in the game directory.
 5. See [INJECTION.md](INJECTION.md) for full instructions and troubleshooting.
 
 ## Install (Cyberpunk 2077 with CET)

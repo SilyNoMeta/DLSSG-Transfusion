@@ -50,10 +50,13 @@ setup_mod_target(RTX40MFG_winmm "winmm" "winmm.def" ".dll")
 setup_mod_target(RTX40MFG_dxgi "dxgi" "dxgi.def" ".dll")
 
 # 4. Standard ASI target (Ultimate ASI Loader / CET / RenoDX)
-setup_mod_target(RTX40MFGAuto "RTX40MFG" "" ".asi")
+setup_mod_target(DLSSGTransfusionAuto "DLSSG-Transfusion" "" ".asi")
 
-# Also copy RTX40MFG.asi to RTX40MFG.dll in dist
-add_custom_command(TARGET RTX40MFGAuto POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:RTX40MFGAuto>" "${CMAKE_BINARY_DIR}/dist/RTX40MFG.dll"
-    COMMENT "Copying generic RTX40MFG.dll to dist/"
+# Also copy DLSSG-Transfusion.asi to DLSSG-Transfusion.dll and backwards-compatible aliases in dist
+add_custom_command(TARGET DLSSGTransfusionAuto POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:DLSSGTransfusionAuto>" "${CMAKE_BINARY_DIR}/dist/DLSSG-Transfusion.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:DLSSGTransfusionAuto>" "${CMAKE_BINARY_DIR}/dist/RTX40MFG.asi"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:DLSSGTransfusionAuto>" "${CMAKE_BINARY_DIR}/dist/RTX40MFG.dll"
+    COMMENT "Copying DLSSG-Transfusion.dll and aliases to dist/"
 )
+

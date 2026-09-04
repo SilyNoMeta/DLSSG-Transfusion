@@ -1,15 +1,16 @@
-# RTX40MFG-Unlock: Universal Multi-Game Proxy & Injection Guide
+# DLSSG-Transfusion: Universal Multi-Game Proxy & Injection Guide
 
 ## Overview
 
-**RTX40MFG-Unlock** is a universal mod designed to unlock Multi-Frame Generation (2x, 3x, 4x, 5x, 6x, and Dynamic Mode) on NVIDIA RTX 40-Series (Ada Lovelace) GPUs across **any game** utilizing NVIDIA Streamline and DLSS Frame Generation (`sl.dlss_g.dll` / `nvngx_dlssg.dll`).
+**DLSSG-Transfusion** is a universal mod designed to unlock Multi-Frame Generation (2x, 3x, 4x, 5x, 6x, and Dynamic Mode) on NVIDIA RTX 40-Series (Ada Lovelace) GPUs across **any game** utilizing NVIDIA Streamline and DLSS Frame Generation (`sl.dlss_g.dll` / `nvngx_dlssg.dll`).
 
-It supports:
+It features:
+- **Blackwell Kernel Transfusion**: Backports Blackwell `sm_120` branchless scatter math to Ada `sm_89` at runtime.
 - **Zero Configuration / Standalone Mode**: Works completely out-of-the-box in any game without Cyber Engine Tweaks (CET).
-- **Proxy DLL Injection**: Pre-built proxies for `version.dll`, `dxgi.dll`, `winmm.dll`, and `RTX40MFG.asi`.
+- **Proxy DLL Injection**: Pre-built proxies for `version.dll`, `dxgi.dll`, `winmm.dll`, and `DLSSG-Transfusion.asi`.
 - **NVIDIA OTA Override**: Forces `slInit` to enable `eAllowOTA | eLoadDownloadedPlugins` so games can load newer/updated models from driver caches or local directories.
 - **Dynamic Multiplier Hotkeys**: Switch multipliers live on the fly during gameplay using hotkeys.
-- **Microsecond Diagnostic Logging**: Writes runtime status directly to `RTX40MFG.log` in the game directory.
+- **Diagnostic & Benchmark Telemetry**: Writes runtime status directly to `DLSSG-Transfusion.log` and per-frame CSV data to `DLSSG-Transfusion_perf.csv`.
 
 ---
 
@@ -22,7 +23,7 @@ Copy **one** of the following DLLs from the `dist/` folder directly into your ga
 | **`version.dll`** | **Primary Recommended Proxy.** Intercepts standard version API calls loaded early by Windows and game engines. Does not conflict with graphics wrappers. | Unreal Engine 4/5 titles, REDengine, Frostbite, Unity, and most modern DX12 games. |
 | **`dxgi.dll`** | Alternative for games that initialize DXGI earlier than `version.dll` or ignore local `version.dll`. | Games that fail to load `version.dll`. *Note: Do not use if you already have ReShade or SpecialK named `dxgi.dll`.* |
 | **`winmm.dll`** | Clean proxy for games with custom anti-cheat or games that already have existing `dxgi.dll` / `version.dll` mods. | Legacy engines and titles requiring alternative injection vectors. |
-| **`RTX40MFG.asi`** | Native ASI plugin format. | Games using an ASI Loader (e.g. Ultimate ASI Loader, Cyber Engine Tweaks, ScriptHook). |
+| **`DLSSG-Transfusion.asi`** | Native ASI plugin format. | Games using an ASI Loader (e.g. Ultimate ASI Loader, Cyber Engine Tweaks, ScriptHook). |
 
 ---
 
@@ -41,7 +42,8 @@ You can control the multiplier at any moment without pausing or exiting the game
 | **`Ctrl + Alt + PageDown`** | Decrement Multiplier | Steps multiplier down by 1 (min 2x, sets Fixed Mode). |
 | **`Ctrl + Alt + D`** | Toggle Dynamic Mode | Toggles between Dynamic and Fixed Mode (default 120 FPS target). |
 
-Hotkeys automatically save the new configuration to `RTX40MFG.json` and reapply the setting instantly on the active render thread.
+Hotkeys automatically save the new configuration to `DLSSG-Transfusion.json` and reapply the setting instantly on the active render thread.
+
 
 ---
 
