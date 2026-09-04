@@ -233,7 +233,7 @@ void MidpointLog(const wchar_t* message)
 
 std::atomic<bool> gConfigForceOta{false};
 std::atomic<bool> gConfigPatchFlipMetering{true};
-std::atomic<bool> gConfigBlackwellTransfusion{false};
+std::atomic<bool> gConfigBlackwellTransfusion{true};
 std::atomic<bool> gConfigLogPerformance{false};
 
 std::wstring gPerfCsvPath;
@@ -875,7 +875,7 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
     size_t transfusionOffset = 0;
     if (FindJsonValue(content, "blackwellTransfusion", transfusionOffset))
     {
-        bool blackwellTransfusion = false;
+        bool blackwellTransfusion = true;
         if (TryParseBoolean(content, "blackwellTransfusion", blackwellTransfusion))
         {
             gConfigBlackwellTransfusion.store(blackwellTransfusion, std::memory_order_relaxed);
