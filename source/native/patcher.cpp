@@ -234,7 +234,7 @@ void MidpointLog(const wchar_t* message)
 std::atomic<bool> gConfigForceOta{false};
 std::atomic<bool> gConfigPatchFlipMetering{true};
 std::atomic<bool> gConfigBlackwellTransfusion{false};
-std::atomic<bool> gConfigLogPerformance{true};
+std::atomic<bool> gConfigLogPerformance{false};
 
 std::wstring gPerfCsvPath;
 FILE* gPerfCsv = nullptr;
@@ -886,7 +886,7 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
     size_t perfOffset = 0;
     if (FindJsonValue(content, "logPerformance", perfOffset))
     {
-        bool logPerf = true;
+        bool logPerf = false;
         if (TryParseBoolean(content, "logPerformance", logPerf))
             gConfigLogPerformance.store(logPerf, std::memory_order_relaxed);
     }
