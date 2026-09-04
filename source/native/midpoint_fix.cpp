@@ -724,13 +724,17 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 
     if (gBlackwellTransfusionEnabled.load(std::memory_order_relaxed) && temporal_fat != nullptr && selected_profile != nullptr)
     {
-        size_t bw_dummy = 0;
-        if (FindBlackwellPtxEntry(temporal_fat, temporal_fat_size, bw_dummy))
+        // Blackwell transfusion is ONLY valid for the refactored Kernel_EstimateIntermMvecsScatter (Profile 2 / DLSS-G 3.10.9+).
+        // For older dlfg_kernel profiles (310.1 - 310.8), Blackwell sm_120 PTX was an unfinished prototype and causes instant crashes.
+        if (std::strcmp(selected_profile->descriptor_name, "EstimateIntermMvecsScatter") == 0)
         {
-            std::vector<uint8_t> rebuilt;
-            std::string why;
-            if (BuildBlackwellTransfusionFatbin(temporal_fat, temporal_fat_size, rebuilt, why))
+            size_t bw_dummy = 0;
+            if (FindBlackwellPtxEntry(temporal_fat, temporal_fat_size, bw_dummy))
             {
+                std::vector<uint8_t> rebuilt;
+                std::string why;
+                if (BuildBlackwellTransfusionFatbin(temporal_fat, temporal_fat_size, rebuilt, why))
+                {
                 void* mem = VirtualAlloc(nullptr, rebuilt.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
                 if (mem)
                 {
@@ -771,6 +775,12 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
             {
                 Log(L"D157 midpoint fix: Blackwell transfusion failed (%hs); falling back to Ada temporal patch", why.c_str());
             }
+            }
+        }
+        else
+        {
+            Log(L"D157 midpoint fix: module uses legacy %hs; Blackwell transfusion bypassed in favor of native Ada temporal patch",
+                selected_profile->descriptor_name);
         }
     }
 
