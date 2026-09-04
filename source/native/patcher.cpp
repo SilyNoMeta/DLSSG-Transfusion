@@ -987,47 +987,31 @@ std::wstring ResolveConfigPath(HMODULE instance, const std::wstring& executableD
     GetModuleFileNameW(instance, modulePath, _countof(modulePath));
     const std::wstring moduleDir = ParentPath(modulePath);
 
-    // List of candidate config filenames in order of preference
-    const wchar_t* candidateNames[] = {
-        L"DLSSG-Transfusion.json",
-        L"RTX40MFG.json",
-        L"RTX40MFG_config.json",
-        L"config.json" // backwards compatibility fallback
-    };
+    constexpr const wchar_t* kConfigFilename = L"DLSSG-Transfusion.json";
 
     // 1. Next to proxy/ASI module
-    for (const wchar_t* name : candidateNames)
-    {
-        const std::wstring p = JoinPath(moduleDir, name);
-        if (IsRegularFile(p))
-            return p;
-    }
+    const std::wstring moduleConfig = JoinPath(moduleDir, kConfigFilename);
+    if (IsRegularFile(moduleConfig))
+        return moduleConfig;
 
     // 2. Next to executable
-    for (const wchar_t* name : candidateNames)
-    {
-        const std::wstring p = JoinPath(executableDirectory, name);
-        if (IsRegularFile(p))
-            return p;
-    }
+    const std::wstring exeConfig = JoinPath(executableDirectory, kConfigFilename);
+    if (IsRegularFile(exeConfig))
+        return exeConfig;
 
     // 3. Cyberpunk CET mod path if it exists
     const std::wstring cetDir = JoinPath(executableDirectory,
         L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG");
     if (IsDirectory(cetDir))
     {
-        for (const wchar_t* name : candidateNames)
-        {
-            const std::wstring p = JoinPath(cetDir, name);
-            if (IsRegularFile(p))
-                return p;
-        }
-        return JoinPath(cetDir, L"DLSSG-Transfusion.json");
+        const std::wstring cetConfig = JoinPath(cetDir, kConfigFilename);
+        if (IsRegularFile(cetConfig))
+            return cetConfig;
+        return cetConfig;
     }
 
     // 4. Default: DLSSG-Transfusion.json next to module or executable
-    return moduleDir.empty() ? JoinPath(executableDirectory, L"DLSSG-Transfusion.json")
-                             : JoinPath(moduleDir, L"DLSSG-Transfusion.json");
+    return moduleDir.empty() ? exeConfig : moduleConfig;
 }
 
 uint64_t StoreControl(const ControlConfig& control)
