@@ -232,6 +232,7 @@ void MidpointLog(const wchar_t* message)
 
 std::atomic<bool> gConfigForceOta{false};
 std::atomic<bool> gConfigPatchFlipMetering{true};
+std::atomic<bool> gConfigBlackwellTransfusion{true};
 
 uint8_t RequestedMaximumGeneratedFrames(const ControlConfig& control)
 {
@@ -739,6 +740,17 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
             gConfigPatchFlipMetering.store(patchFlip, std::memory_order_relaxed);
     }
 
+    size_t transfusionOffset = 0;
+    if (FindJsonValue(content, "blackwellTransfusion", transfusionOffset))
+    {
+        bool blackwellTransfusion = true;
+        if (TryParseBoolean(content, "blackwellTransfusion", blackwellTransfusion))
+        {
+            gConfigBlackwellTransfusion.store(blackwellTransfusion, std::memory_order_relaxed);
+            midpoint_fix::SetBlackwellTransfusionEnabled(blackwellTransfusion);
+        }
+    }
+
     control = parsed;
     return true;
 }
@@ -768,14 +780,16 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         "  \"dynamicTargetFrameRate\": %u,\n"
         "  \"dynamicExperimental56\": %s,\n"
         "  \"forceOTA\": %s,\n"
-        "  \"patchFlipMetering\": %s\n"
+        "  \"patchFlipMetering\": %s,\n"
+        "  \"blackwellTransfusion\": %s\n"
         "}\n",
         control.multiplier,
         control.dynamic ? "dynamic" : "fixed",
         control.dynamicTargetFrameRate,
         control.dynamicExperimental56 ? "true" : "false",
         gConfigForceOta.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? "true" : "false");
+        gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? "true" : "false",
+        gConfigBlackwellTransfusion.load(std::memory_order_relaxed) ? "true" : "false");
     if (len <= 0) return false;
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -2925,12 +2939,14 @@ DWORD WINAPI PatchWorker(void* context)
     DeleteFileW(gStatusPath.c_str());
     const ControlConfig initialControl = ReadInitialControl();
     StoreControl(initialControl);
+    midpoint_fix::SetBlackwellTransfusionEnabled(gConfigBlackwellTransfusion.load(std::memory_order_relaxed));
     FILETIME configWriteTime{};
     ReadLastWriteTime(gConfigPath, configWriteTime);
     Log(L"Initial control: mode=%s multiplier=%ux dynamicTarget=%u FPS "
-        L"dynamicExperimental56=%d; config: %s",
+        L"dynamicExperimental56=%d blackwellTransfusion=%d; config: %s",
         initialControl.dynamic ? L"dynamic" : L"fixed", initialControl.multiplier,
         initialControl.dynamicTargetFrameRate, initialControl.dynamicExperimental56,
+        gConfigBlackwellTransfusion.load(std::memory_order_relaxed),
         gConfigPath.c_str());
 
     Log(L"Patch worker started for PID %lu", static_cast<unsigned long>(pid));

@@ -21,6 +21,7 @@ constexpr uint32_t kFatbinMagic = 0xBA55ED50u;
 constexpr size_t kOuterHeader = 16;
 constexpr uint32_t kPtxKind = 1;
 constexpr uint32_t kAdaArch = 89;
+constexpr uint32_t kBlackwellArch = 120;
 constexpr uint64_t kUncompressedFlags = 0x41;
 
 struct TemporalProfile
@@ -187,6 +188,31 @@ inline bool FindAdaPtxEntry(const uint8_t* fat, size_t fat_size, size_t& entry_o
     return false;
 }
 
+inline bool FindBlackwellPtxEntry(const uint8_t* fat, size_t fat_size, size_t& entry_offset)
+{
+    if (fat_size < kOuterHeader || ReadU32(fat) != kFatbinMagic) return false;
+    if (ReadU16(fat + 6) != kOuterHeader) return false;
+    const uint64_t declared = ReadU64(fat + 8);
+    if (declared + kOuterHeader != fat_size) return false;
+
+    size_t p = kOuterHeader;
+    while (p + 64 <= fat_size)
+    {
+        const uint32_t kind = ReadU16(fat + p);
+        const uint32_t hdr = ReadU32(fat + p + 4);
+        const uint64_t payload = ReadU64(fat + p + 8);
+        if (hdr < 64 || payload == 0) return false;
+        if (p + hdr + payload > fat_size) return false;
+        if (kind == kPtxKind && ReadU32(fat + p + 28) == kBlackwellArch)
+        {
+            entry_offset = p;
+            return true;
+        }
+        p += hdr + payload;
+    }
+    return false;
+}
+
 inline bool BuildTemporalFatbin(const uint8_t* fat, size_t fat_size,
                                 const TemporalProfile& profile,
                                 std::vector<uint8_t>& out, std::string& why)
@@ -334,7 +360,92 @@ inline bool BuildTemporalFatbin(const uint8_t* fat, size_t fat_size,
     return true;
 }
 
+inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
+                                           std::vector<uint8_t>& out, std::string& why)
+{
+    size_t ada_entry = 0;
+    if (!FindAdaPtxEntry(fat, fat_size, ada_entry))
+    {
+        why = "no sm_89 Ada PTX entry in fatbin";
+        return false;
+    }
+
+    size_t bw_entry = 0;
+    if (!FindBlackwellPtxEntry(fat, fat_size, bw_entry))
+    {
+        why = "no sm_120 Blackwell PTX entry in fatbin";
+        return false;
+    }
+
+    const uint32_t bw_hdr = ReadU32(fat + bw_entry + 4);
+    const uint32_t bw_comp = ReadU32(fat + bw_entry + 16);
+    const uint64_t bw_raw = ReadU64(fat + bw_entry + 56);
+    if (bw_comp == 0 || bw_raw == 0 || bw_raw > (8u << 20))
+    {
+        why = "Blackwell PTX entry is not compressed as expected";
+        return false;
+    }
+
+    std::vector<uint8_t> bw_ptx(static_cast<size_t>(bw_raw));
+    if (!Lz4BlockDecompress(fat + bw_entry + bw_hdr, bw_comp, bw_ptx.data(), bw_ptx.size()))
+    {
+        why = "Blackwell LZ4 decompression failed";
+        return false;
+    }
+
+    constexpr char kTargetBw[] = ".target sm_120";
+    constexpr char kTargetAda[] = ".target sm_89\n";
+    constexpr size_t kTargetBwLen = sizeof(kTargetBw) - 1;
+
+    const char* ptx_str = reinterpret_cast<const char*>(bw_ptx.data());
+    const size_t ptx_size = bw_ptx.size();
+    size_t target_pos = SIZE_MAX;
+    for (size_t i = 0; i + kTargetBwLen <= ptx_size; ++i)
+    {
+        if (std::memcmp(ptx_str + i, kTargetBw, kTargetBwLen) == 0)
+        {
+            target_pos = i;
+            break;
+        }
+    }
+
+    if (target_pos == SIZE_MAX)
+    {
+        why = "could not find .target sm_120 in Blackwell PTX";
+        return false;
+    }
+
+    std::vector<uint8_t> patched;
+    patched.reserve(ptx_size + 16);
+    patched.insert(patched.end(), bw_ptx.begin(), bw_ptx.begin() + target_pos);
+    patched.insert(patched.end(), kTargetAda, kTargetAda + std::strlen(kTargetAda));
+    size_t after = target_pos + kTargetBwLen;
+    while (after < ptx_size && (ptx_str[after] == '\r' || ptx_str[after] == '\n' || ptx_str[after] == ' '))
+        ++after;
+    patched.insert(patched.end(), bw_ptx.begin() + after, bw_ptx.end());
+
+    const uint32_t ada_hdr = ReadU32(fat + ada_entry + 4);
+    const size_t padded = (patched.size() + 7) & ~size_t{7};
+    const size_t final_size = ada_entry + ada_hdr + padded;
+
+    out.assign(fat, fat + ada_entry + ada_hdr);
+    out.resize(final_size, 0);
+    std::memcpy(out.data() + ada_entry + ada_hdr, patched.data(), patched.size());
+
+    const uint64_t payload64 = padded;
+    const uint32_t zero32 = 0;
+    const uint64_t zero64 = 0;
+    std::memcpy(out.data() + ada_entry + 8, &payload64, sizeof(payload64));
+    std::memcpy(out.data() + ada_entry + 16, &zero32, sizeof(zero32));
+    std::memcpy(out.data() + ada_entry + 40, &kUncompressedFlags, sizeof(kUncompressedFlags));
+    std::memcpy(out.data() + ada_entry + 56, &zero64, sizeof(zero64));
+    const uint64_t outer = final_size - kOuterHeader;
+    std::memcpy(out.data() + 8, &outer, sizeof(outer));
+    return true;
+}
+
 inline const TemporalProfile* FindTemporalProfile(const uint8_t* fat, size_t fat_size)
+
 {
     size_t entry = 0;
     if (!FindAdaPtxEntry(fat, fat_size, entry)) return nullptr;
@@ -399,6 +510,8 @@ std::vector<ModuleMidpointRecord> gPatchedModules;
 std::atomic<bool> gReady{false};
 std::atomic<uint32_t> gFailureCode{0};
 std::atomic<LogCallback> gLogCallback{nullptr};
+std::atomic<bool> gBlackwellTransfusionEnabled{true};
+std::atomic<bool> gBlackwellTransfusionActive{false};
 
 void Log(const wchar_t* format, ...)
 {
@@ -417,6 +530,16 @@ void Log(const wchar_t* format, ...)
 void SetLogCallback(LogCallback callback) noexcept
 {
     gLogCallback.store(callback, std::memory_order_release);
+}
+
+void SetBlackwellTransfusionEnabled(bool enabled) noexcept
+{
+    gBlackwellTransfusionEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool IsBlackwellTransfusionActive() noexcept
+{
+    return gBlackwellTransfusionActive.load(std::memory_order_acquire);
 }
 
 bool ObserveD3D12Device(void*) noexcept
@@ -608,11 +731,34 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 
     std::vector<uint8_t> rebuilt;
     std::string why;
-    if (!BuildTemporalFatbin(fat, fat_size, *selected_profile, rebuilt, why))
+    bool transfusionApplied = false;
+
+    if (gBlackwellTransfusionEnabled.load(std::memory_order_relaxed))
     {
-        Log(L"D157 midpoint fix: fatbin rebuild failed in %s (%hs)", path ? path : L"", why.c_str());
-        gFailureCode.store(6, std::memory_order_release);
-        return false;
+        size_t bw_dummy = 0;
+        if (FindBlackwellPtxEntry(fat, fat_size, bw_dummy))
+        {
+            if (BuildBlackwellTransfusionFatbin(fat, fat_size, rebuilt, why))
+            {
+                transfusionApplied = true;
+                gBlackwellTransfusionActive.store(true, std::memory_order_release);
+            }
+            else
+            {
+                Log(L"D157 midpoint fix: Blackwell transfusion failed (%hs); falling back to Ada temporal patch", why.c_str());
+            }
+        }
+    }
+
+    if (!transfusionApplied)
+    {
+        gBlackwellTransfusionActive.store(false, std::memory_order_release);
+        if (!BuildTemporalFatbin(fat, fat_size, *selected_profile, rebuilt, why))
+        {
+            Log(L"D157 midpoint fix: fatbin rebuild failed in %s (%hs)", path ? path : L"", why.c_str());
+            gFailureCode.store(6, std::memory_order_release);
+            return false;
+        }
     }
 
     void* mem = VirtualAlloc(nullptr, rebuilt.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -648,8 +794,16 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
     gReady.store(true, std::memory_order_release);
     gFailureCode.store(0, std::memory_order_release);
 
-    Log(L"D157 midpoint fix: redirected %zu %hs descriptor(s) in %s to temporal-corrected rebuild (%zu bytes)",
-        slots.size(), selected_profile->descriptor_name, path ? path : L"", rebuilt.size());
+    if (transfusionApplied)
+    {
+        Log(L"D157 midpoint fix: redirected %zu %hs descriptor(s) in %s to BLACKWELL TRANSFUSION (sm_120 -> sm_89, branchless, %zu bytes)",
+            slots.size(), selected_profile->descriptor_name, path ? path : L"", rebuilt.size());
+    }
+    else
+    {
+        Log(L"D157 midpoint fix: redirected %zu %hs descriptor(s) in %s to temporal-corrected rebuild (%zu bytes)",
+            slots.size(), selected_profile->descriptor_name, path ? path : L"", rebuilt.size());
+    }
     return true;
 }
 
@@ -676,6 +830,7 @@ void Restore() noexcept
     }
     gPatchedModules.clear();
     gReady.store(false, std::memory_order_release);
+    gBlackwellTransfusionActive.store(false, std::memory_order_release);
 }
 
 } // namespace midpoint_fix
