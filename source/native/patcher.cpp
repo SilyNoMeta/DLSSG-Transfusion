@@ -3124,8 +3124,25 @@ DWORD WINAPI PatchWorker(void* context)
     GetModuleFileNameW(nullptr, executablePath, _countof(executablePath));
     const std::wstring executableDirectory = ParentPath(executablePath);
     gConfigPath = ResolveConfigPath(static_cast<HMODULE>(context), executableDirectory);
-    gStatusPath = JoinPath(ParentPath(gConfigPath), L"bridge_status.json");
-    DeleteFileW(gStatusPath.c_str());
+
+    const std::wstring cetDir = JoinPath(executableDirectory,
+        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG");
+    if (IsDirectory(cetDir))
+    {
+        gStatusPath = JoinPath(cetDir, L"bridge_status.json");
+        DeleteFileW(gStatusPath.c_str());
+    }
+    else
+    {
+        gStatusPath.clear();
+        // Clean up any stale bridge_status.json in the config or game directory
+        const std::wstring staleStatus = JoinPath(ParentPath(gConfigPath), L"bridge_status.json");
+        if (IsRegularFile(staleStatus))
+            DeleteFileW(staleStatus.c_str());
+        const std::wstring staleExeStatus = JoinPath(executableDirectory, L"bridge_status.json");
+        if (IsRegularFile(staleExeStatus))
+            DeleteFileW(staleExeStatus.c_str());
+    }
     gPerfCsvPath = JoinPath(ParentPath(gConfigPath), L"DLSSG-Transfusion_perf.csv");
     const ControlConfig initialControl = ReadInitialControl();
     StoreControl(initialControl);
@@ -3195,8 +3212,17 @@ DWORD WINAPI PatchWorker(void* context)
     PublishPatchRoute();
     PublishLiveBridge(initialControl);
     ControlConfig activeControl = initialControl;
-    if (!WriteBridgeStatus(activeControl, pid))
-        Log(L"Could not publish CET bridge status file: %s", gStatusPath.c_str());
+    if (!gStatusPath.empty())
+    {
+        if (!WriteBridgeStatus(activeControl, pid))
+            Log(L"Could not publish CET bridge status file: %s", gStatusPath.c_str());
+        else
+            Log(L"[BRIDGE] CET status bridge active at: %s", gStatusPath.c_str());
+    }
+    else
+    {
+        Log(L"[BRIDGE] Standalone mode (CET IPC inactive; bridge diagnostics integrated into log)");
+    }
 
     // CET writes config.json when the user changes the mode. Watch it off
     // the presenting thread and atomically publish changes for the SetOptions hook.
@@ -3268,7 +3294,8 @@ DWORD WINAPI PatchWorker(void* context)
 
         if (++heartbeatTicks >= 10)
         {
-            WriteBridgeStatus(activeControl, pid);
+            if (!gStatusPath.empty())
+                WriteBridgeStatus(activeControl, pid);
             heartbeatTicks = 0;
         }
     }
