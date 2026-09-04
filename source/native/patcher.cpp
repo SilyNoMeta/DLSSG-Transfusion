@@ -1,6 +1,9 @@
 #include "shared.h"
 #include "midpoint_fix.h"
 #include "dlssg_provider_policy.h"
+#include "proxy.h"
+#include "detours/detours.h"
+#include "nvidia_mfg_manifest.generated.h"
 
 #include <Windows.h>
 #include <TlHelp32.h>
@@ -40,6 +43,9 @@ std::atomic<PFun_slSetTag*> gOriginalSetTag{nullptr};
 std::atomic<PFun_slSetTagForFrame*> gOriginalSetTagForFrame{nullptr};
 std::atomic<PFun_slDLSSGSetOptions*> gOriginalSetOptions{nullptr};
 std::atomic<PFun_slDLSSGGetState*> gOriginalGetState{nullptr};
+using PFun_slSetData = sl::Result(const sl::BaseStructure*, sl::CommandBuffer*);
+std::atomic<PFun_slSetData*> gOriginalSlSetData{nullptr};
+PFun_slSetData* gDetourSlSetData = nullptr;
 std::atomic<bool> gSetOptionsHookExposed{false};
 std::atomic<bool> gGetStateHookExposed{false};
 std::atomic<bool> gSetOptionsSeen{false};
@@ -63,6 +69,7 @@ std::atomic<uint64_t> gNotInitializedRetryCount{0};
 std::atomic<bool> gDllNotificationRegistered{false};
 std::atomic<bool> gModuleInventoryDirty{true};
 std::atomic<bool> gLiveHookInstalled{false};
+std::atomic<bool> gInterposerDetoursInstalled{false};
 std::atomic<bool> gUiTagHookInstalled{false};
 std::atomic<uint32_t> gLoadedWrapperCandidates{0};
 std::atomic<uint32_t> gPatchedWrapperCandidates{0};
@@ -90,6 +97,11 @@ std::atomic<uint32_t> gDlssFpsMilli{0};
 std::atomic<uint32_t> gFpsSampleWindowMs{0};
 std::atomic<uint64_t> gFpsSampleTick{0};
 std::atomic<bool> gLogReady{false};
+std::atomic<uint32_t> gAdvertisedMaxGenerated{5};
+std::atomic<bool> gStopWorker{false};
+std::atomic<bool> gFlipMeteringPatched{false};
+std::atomic<uint32_t> gFlipMeteringOffset{0};
+std::atomic<uint32_t> gFlipMeteringValue{0};
 std::mutex gStreamlineCallMutex;
 std::mutex gLastOptionsMutex;
 std::mutex gModuleMutex;
@@ -197,12 +209,18 @@ void Log(const wchar_t* format, ...)
     _vsnwprintf_s(message, _countof(message), _TRUNCATE, format, args);
     va_end(args);
 
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    wchar_t timestamped[2560]{};
+    swprintf_s(timestamped, L"[%04u-%02u-%02u %02u:%02u:%02u.%03u] %s",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, message);
+
     OutputDebugStringW(L"[MfgUnlock] ");
-    OutputDebugStringW(message);
+    OutputDebugStringW(timestamped);
     OutputDebugStringW(L"\n");
     if (gLog)
     {
-        fwprintf_s(gLog, L"%s\n", message);
+        fwprintf_s(gLog, L"%s\n", timestamped);
         fflush(gLog);
     }
 }
@@ -212,9 +230,13 @@ void MidpointLog(const wchar_t* message)
     Log(L"%s", message ? message : L"");
 }
 
-uint8_t RequestedMaximumGeneratedFrames(const ControlConfig&)
+std::atomic<bool> gConfigForceOta{false};
+std::atomic<bool> gConfigPatchFlipMetering{true};
+
+uint8_t RequestedMaximumGeneratedFrames(const ControlConfig& control)
 {
-    // Create one fixed-capacity wrapper and vary only numFramesToGenerate.
+    if (control.dynamic && !control.dynamicExperimental56)
+        return kStandardMaximumGeneratedFrames;
     return kExperimentalMaximumGeneratedFrames;
 }
 
@@ -448,12 +470,23 @@ void RecordDlssgStateResult(
         return;
     }
 
-    const uint32_t previous =
-        gActualFramesPresented.exchange(state.numFramesActuallyPresented,
-            std::memory_order_relaxed);
+    const uint32_t currentMultiplier = state.numFramesActuallyPresented;
+    const uint32_t currentStatus = static_cast<uint32_t>(state.status);
+    const uint32_t previousStatus = gDlssgStatus.exchange(currentStatus, std::memory_order_relaxed);
+
+    // Streamline / OptiScaler queries can transiently report 1 presented frame during
+    // intermediate queries or non-present polls while Frame Generation is actively enabled.
+    const bool fgOn = gGameFrameGenerationOn.load(std::memory_order_relaxed);
+    const bool validMultiplierUpdate = (currentMultiplier >= 2) || !fgOn;
+
+    uint32_t previousMultiplier = gActualFramesPresented.load(std::memory_order_relaxed);
+    if (validMultiplierUpdate)
+    {
+        previousMultiplier = gActualFramesPresented.exchange(currentMultiplier, std::memory_order_relaxed);
+    }
+
     if (fpsFrameSample)
-        UpdateFpsTelemetry(state.numFramesActuallyPresented);
-    gDlssgStatus.store(static_cast<uint32_t>(state.status), std::memory_order_relaxed);
+        UpdateFpsTelemetry(currentMultiplier);
     if (state.structVersion >= sl::kStructVersion2)
         gNumFramesToGenerateMax.store(
             state.numFramesToGenerateMax, std::memory_order_relaxed);
@@ -463,11 +496,11 @@ void RecordDlssgStateResult(
             std::memory_order_relaxed);
     gStateSampleTick.store(GetTickCount64(), std::memory_order_release);
 
-    if (previous != state.numFramesActuallyPresented)
+    if ((validMultiplierUpdate && previousMultiplier != currentMultiplier) || (previousStatus != currentStatus))
         Log(L"DLSS-G actual presentation count: %ux (maximum generated frames=%u, status=%u)",
-            state.numFramesActuallyPresented,
+            validMultiplierUpdate ? currentMultiplier : previousMultiplier,
             gNumFramesToGenerateMax.load(std::memory_order_relaxed),
-            static_cast<uint32_t>(state.status));
+            currentStatus);
 }
 
 std::wstring ParentPath(const std::wstring& path)
@@ -485,6 +518,76 @@ std::wstring JoinPath(const std::wstring& left, const std::wstring& right)
     return left + L"\\" + right;
 }
 
+void InitLogging(HINSTANCE instance, const std::wstring& exeDir)
+{
+    if (gLog) return;
+    wchar_t modPath[MAX_PATH]{};
+    GetModuleFileNameW(instance, modPath, MAX_PATH);
+    const std::wstring modDir = ParentPath(modPath);
+
+    std::wstring logPath = JoinPath(modDir, L"RTX40MFG.log");
+    gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+    if (!gLog)
+    {
+        logPath = JoinPath(exeDir, L"RTX40MFG.log");
+        gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+    }
+    if (!gLog)
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        logPath = JoinPath(tempDir, L"RTX40MFG.log");
+        gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+    }
+    gLogReady.store(gLog != nullptr, std::memory_order_release);
+
+    Log(L"============================================================");
+    Log(L"RTX40MFG-Unlock (General-Use Proxy & Multi-Game Edition)");
+    Log(L"Loaded as: %s", proxy::GetCurrentTypeName());
+    if (proxy::GetCurrentType() != proxy::ProxyType::None)
+        Log(L"Proxied system DLL: %s", proxy::GetOriginalLibraryPath());
+    Log(L"Module Path: %s", modPath);
+    Log(L"Game Directory: %s (PID: %lu)", exeDir.c_str(), GetCurrentProcessId());
+
+    wchar_t exeFile[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exeFile, MAX_PATH);
+    std::wstring exeFileName = exeFile;
+    const auto lastSlash = exeFileName.find_last_of(L"\\/");
+    if (lastSlash != std::wstring::npos)
+        exeFileName = exeFileName.substr(lastSlash + 1);
+
+    std::string key;
+    for (wchar_t wc : exeFileName)
+    {
+        if ((wc >= L'a' && wc <= L'z') || (wc >= L'0' && wc <= L'9'))
+            key.push_back(static_cast<char>(wc));
+        else if (wc >= L'A' && wc <= L'Z')
+            key.push_back(static_cast<char>(wc - L'A' + 'a'));
+    }
+    const size_t exePos = key.rfind("exe");
+    if (exePos != std::string::npos && exePos + 3 == key.size())
+        key.erase(exePos);
+
+    Tier tier = LookupManifestTier(key);
+    if (tier == Tier::eUnknown)
+    {
+        for (const auto& entry : kManifest)
+        {
+            if (key.find(entry.key) != std::string::npos || entry.key.find(key) != std::string::npos)
+            {
+                tier = entry.tier;
+                break;
+            }
+        }
+    }
+
+    const char* tierStr = (tier == Tier::eSixX) ? "6x (Official NVIDIA Tier)" :
+                          (tier == Tier::eFourX) ? "4x (NVIDIA Recommended Ceiling)" :
+                          "Universal 6x (Unlisted Title)";
+    Log(L"Game Identity: \"%ls\" -> %hs", exeFileName.c_str(), tierStr);
+    Log(L"============================================================");
+}
+
 uint32_t ClassifyLoadedRoute(const std::wstring& path)
 {
     if (!gExecutableDirectory.empty()
@@ -495,12 +598,15 @@ uint32_t ClassifyLoadedRoute(const std::wstring& path)
 
 bool BridgeReady()
 {
-    return gLiveHookInstalled.load(std::memory_order_acquire)
-        && gSetOptionsHookExposed.load(std::memory_order_acquire)
-        && gActiveWrapperObserved.load(std::memory_order_acquire)
-        && gActiveWrapperPatched.load(std::memory_order_acquire)
-        && gPatchedNgxCandidates.load(std::memory_order_acquire) > 0
-        && midpoint_fix::Ready();
+    const bool hookOk = gLiveHookInstalled.load(std::memory_order_acquire)
+        || gInterposerDetoursInstalled.load(std::memory_order_acquire);
+    const bool midpointOk = midpoint_fix::Ready();
+    return hookOk
+        && gSetOptionsHookExposed.load(std::memory_order_relaxed)
+        && gActiveWrapperObserved.load(std::memory_order_relaxed)
+        && gActiveWrapperPatched.load(std::memory_order_relaxed)
+        && gPatchedNgxCandidates.load(std::memory_order_relaxed) > 0
+        && midpointOk;
 }
 
 const char* PatchRouteName()
@@ -524,6 +630,12 @@ bool IsRegularFile(const std::wstring& path)
 {
     const DWORD attributes = GetFileAttributesW(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+bool IsDirectory(const std::wstring& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 bool FindJsonValue(const std::string& content, const char* name, size_t& value)
@@ -611,6 +723,22 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
             parsed.dynamicExperimental56))
         return false;
 
+    size_t otaOffset = 0;
+    if (FindJsonValue(content, "forceOTA", otaOffset))
+    {
+        bool forceOta = false;
+        if (TryParseBoolean(content, "forceOTA", forceOta))
+            gConfigForceOta.store(forceOta, std::memory_order_relaxed);
+    }
+
+    size_t flipOffset = 0;
+    if (FindJsonValue(content, "patchFlipMetering", flipOffset))
+    {
+        bool patchFlip = false;
+        if (TryParseBoolean(content, "patchFlipMetering", patchFlip))
+            gConfigPatchFlipMetering.store(patchFlip, std::memory_order_relaxed);
+    }
+
     control = parsed;
     return true;
 }
@@ -628,6 +756,34 @@ bool ReadControlFile(const std::wstring& path, ControlConfig& control)
     const BOOL read = ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &bytesRead, nullptr);
     CloseHandle(file);
     return read && TryParseControl(buffer.data(), bytesRead, control);
+}
+
+bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
+{
+    char json[512]{};
+    const int len = sprintf_s(json,
+        "{\n"
+        "  \"multiplier\": %u,\n"
+        "  \"mode\": \"%s\",\n"
+        "  \"dynamicTargetFrameRate\": %u,\n"
+        "  \"dynamicExperimental56\": %s,\n"
+        "  \"forceOTA\": %s,\n"
+        "  \"patchFlipMetering\": %s\n"
+        "}\n",
+        control.multiplier,
+        control.dynamic ? "dynamic" : "fixed",
+        control.dynamicTargetFrameRate,
+        control.dynamicExperimental56 ? "true" : "false",
+        gConfigForceOta.load(std::memory_order_relaxed) ? "true" : "false",
+        gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? "true" : "false");
+    if (len <= 0) return false;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const BOOL res = WriteFile(file, json, static_cast<DWORD>(len), &written, nullptr);
+    CloseHandle(file);
+    return res && written == static_cast<DWORD>(len);
 }
 
 bool ReadLastWriteTime(const std::wstring& path, FILETIME& writeTime)
@@ -660,15 +816,50 @@ std::wstring ResolveConfigPath(HMODULE instance, const std::wstring& executableD
     if (explicitLength > 0 && explicitLength < _countof(explicitPath))
         return std::wstring(explicitPath, explicitLength);
 
-    const std::wstring cetPath = JoinPath(executableDirectory,
-        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG\\config.json");
-    if (IsRegularFile(cetPath))
-        return cetPath;
-
     wchar_t modulePath[32768]{};
     GetModuleFileNameW(instance, modulePath, _countof(modulePath));
-    const std::wstring legacyPath = JoinPath(ParentPath(ParentPath(modulePath)), L"config.json");
-    return IsRegularFile(legacyPath) ? legacyPath : cetPath;
+    const std::wstring moduleDir = ParentPath(modulePath);
+
+    // List of candidate config filenames in order of preference
+    const wchar_t* candidateNames[] = {
+        L"RTX40MFG.json",
+        L"RTX40MFG_config.json",
+        L"config.json" // backwards compatibility fallback
+    };
+
+    // 1. Next to proxy/ASI module
+    for (const wchar_t* name : candidateNames)
+    {
+        const std::wstring p = JoinPath(moduleDir, name);
+        if (IsRegularFile(p))
+            return p;
+    }
+
+    // 2. Next to executable
+    for (const wchar_t* name : candidateNames)
+    {
+        const std::wstring p = JoinPath(executableDirectory, name);
+        if (IsRegularFile(p))
+            return p;
+    }
+
+    // 3. Cyberpunk CET mod path if it exists
+    const std::wstring cetDir = JoinPath(executableDirectory,
+        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG");
+    if (IsDirectory(cetDir))
+    {
+        for (const wchar_t* name : candidateNames)
+        {
+            const std::wstring p = JoinPath(cetDir, name);
+            if (IsRegularFile(p))
+                return p;
+        }
+        return JoinPath(cetDir, L"RTX40MFG.json");
+    }
+
+    // 4. Default: RTX40MFG.json next to module or executable
+    return moduleDir.empty() ? JoinPath(executableDirectory, L"RTX40MFG.json")
+                             : JoinPath(moduleDir, L"RTX40MFG.json");
 }
 
 uint64_t StoreControl(const ControlConfig& control)
@@ -966,14 +1157,15 @@ void CaptureGameOptions(
 }
 
 bool ReadLastGameOptions(
-    const sl::ViewportHandle& viewport, sl::DLSSGOptions& options)
+    const sl::ViewportHandle& viewport, sl::DLSSGOptions& options,
+    sl::ViewportHandle* outViewport = nullptr)
 {
     std::lock_guard lock(gLastOptionsMutex);
-    if (!gLastGameOptions.valid
-        || static_cast<uint32_t>(gLastGameOptions.viewport)
-            != static_cast<uint32_t>(viewport))
+    if (!gLastGameOptions.valid)
         return false;
     options = gLastGameOptions.options;
+    if (outViewport)
+        *outViewport = gLastGameOptions.viewport;
     return true;
 }
 
@@ -1018,14 +1210,6 @@ void RecordAppliedControl(const ControlSnapshot& snapshot, sl::Result result,
         Log(L"%s fixed multiplier: %ux, result=%d",
             liveReapply ? L"Live-reapplied" : L"Applied",
             snapshot.control.multiplier, static_cast<int>(result));
-    Log(L"UI recomposition: enabled=%d forced=%d inputsReady=%d "
-        L"gameEnabled=%d optionsVersion=%u hudlessFormat=%u uiFormat=%u",
-        uiRecompositionEnabled, uiRecompositionForced,
-        gUiInputsReady.load(std::memory_order_relaxed),
-        gGameUiRecompositionEnabled.load(std::memory_order_relaxed),
-        gGameOptionsStructVersion.load(std::memory_order_relaxed),
-        gGameHudlessBufferFormat.load(std::memory_order_relaxed),
-        gGameUiBufferFormat.load(std::memory_order_relaxed));
 }
 
 sl::Result SubmitAdjustedOptions(
@@ -1044,32 +1228,13 @@ sl::Result SubmitAdjustedOptions(
     const sl::Result result = original(viewport, adjusted);
     RecordAppliedControl(snapshot, result, liveReapply,
         uiRecompositionEnabled, forceUiRecomposition);
-    if (!liveReapply
-        && (result == sl::Result::eOk || result == sl::Result::eWarnOutOfVRAM))
-    {
-        auto* getState = gOriginalGetState.load(std::memory_order_acquire);
-        if (getState)
-        {
-            sl::DLSSGState state{};
-            const sl::Result stateResult = getState(viewport, state, &adjusted);
-            RecordDlssgStateResult(stateResult, state, true);
-        }
-        else
-        {
-            UpdateFpsTelemetry(0);
-        }
-    }
-    // Cyberpunk treats every non-zero Result as a hard failure. Result 39 is a
-    // warning rather than a rejected options update, so preserve it in the
-    // bridge status while returning success to the host.
     return result == sl::Result::eWarnOutOfVRAM ? sl::Result::eOk : result;
 }
 
 void ReapplyPendingControl(const sl::ViewportHandle& viewport)
 {
     if (!gControlReady.load(std::memory_order_acquire)
-        || !gGameFrameGenerationOn.load(std::memory_order_acquire)
-        || !BridgeReady())
+        || !gGameFrameGenerationOn.load(std::memory_order_acquire))
         return;
 
     const ControlSnapshot snapshot = ReadControlSnapshot();
@@ -1095,8 +1260,12 @@ void ReapplyPendingControl(const sl::ViewportHandle& viewport)
     }
 
     auto* original = gOriginalSetOptions.load(std::memory_order_acquire);
+    auto* originalSetData = gOriginalSlSetData.load(std::memory_order_acquire);
+    if (!originalSetData && gDetourSlSetData)
+        originalSetData = gDetourSlSetData;
     sl::DLSSGOptions source{};
-    if (!original || !ReadLastGameOptions(viewport, source))
+    sl::ViewportHandle targetViewport = viewport;
+    if ((!original && !originalSetData) || !ReadLastGameOptions(viewport, source, &targetViewport))
         return;
     if (retryNotInitialized)
     {
@@ -1107,12 +1276,27 @@ void ReapplyPendingControl(const sl::ViewportHandle& viewport)
             static_cast<unsigned long long>(retry));
     }
 
-    gSetOptionsCalls.fetch_add(1, std::memory_order_relaxed);
-    const sl::Result result =
-        SubmitAdjustedOptions(original, viewport, source, snapshot, true);
-    if (result != sl::Result::eOk)
-        Log(L"Live reapply failed for request revision %llu: result=%d",
-            static_cast<unsigned long long>(snapshot.revision), static_cast<int>(result));
+    if (original)
+    {
+        gSetOptionsCalls.fetch_add(1, std::memory_order_relaxed);
+        const sl::Result result =
+            SubmitAdjustedOptions(original, targetViewport, source, snapshot, true);
+        if (result != sl::Result::eOk && result != sl::Result::eWarnOutOfVRAM)
+            Log(L"Live reapply failed for request revision %llu: result=%d",
+                static_cast<unsigned long long>(snapshot.revision), static_cast<int>(result));
+    }
+    else if (originalSetData)
+    {
+        sl::DLSSGOptions adjusted = BuildAdjustedOptions(source, snapshot, false, false);
+        sl::ViewportHandle vpCopy = targetViewport;
+        vpCopy.next = &adjusted;
+        adjusted.next = nullptr;
+        const sl::Result result = originalSetData(&vpCopy, nullptr);
+        RecordAppliedControl(snapshot, result, true, false, false);
+        if (result != sl::Result::eOk && result != sl::Result::eWarnOutOfVRAM)
+            Log(L"Live reapply via setData failed for request revision %llu: result=%d",
+                static_cast<unsigned long long>(snapshot.revision), static_cast<int>(result));
+    }
 }
 
 sl::Result HookSlDLSSGSetOptions(
@@ -1171,6 +1355,14 @@ sl::Result HookSlDLSSGGetState(
     std::lock_guard callLock(gStreamlineCallMutex);
     ReapplyPendingControl(viewport);
     const sl::Result result = original(viewport, state, options);
+    if (result == sl::Result::eOk && state.structVersion >= sl::kStructVersion2)
+    {
+        const uint32_t advertised = gNumFramesToGenerateMax.load(std::memory_order_relaxed);
+        if (advertised >= 2 && state.numFramesToGenerateMax < advertised)
+        {
+            state.numFramesToGenerateMax = advertised;
+        }
+    }
     RecordDlssgStateResult(result, state, false);
     return result;
 }
@@ -1241,6 +1433,153 @@ sl::Result HookSlSetD3DDevice(void* device)
     if (midpoint_fix::ObserveD3D12Device(device))
         gModuleInventoryDirty.store(true, std::memory_order_release);
     return original(device);
+}
+
+struct VulkanInfoPrefix
+{
+    sl::BaseStructure* next = nullptr;
+    sl::StructType structType{};
+    size_t structVersion = 0;
+    void* device = nullptr;
+    void* instance = nullptr;
+    void* physicalDevice = nullptr;
+};
+using PFun_slSetVulkanInfo = sl::Result(const VulkanInfoPrefix&);
+std::atomic<PFun_slSetVulkanInfo*> gOriginalSetVulkanInfo{nullptr};
+PFun_slSetVulkanInfo* gDetourSlSetVulkanInfo = nullptr;
+
+sl::Result HookSlSetVulkanInfo(const VulkanInfoPrefix& info)
+{
+    auto* original = gOriginalSetVulkanInfo.load(std::memory_order_acquire);
+    if (!original && gDetourSlSetVulkanInfo)
+        original = gDetourSlSetVulkanInfo;
+    if (!original)
+        return sl::Result::eErrorNotInitialized;
+
+    void* physicalDevice = nullptr;
+    __try
+    {
+        if (info.structVersion >= sl::kStructVersion1)
+            physicalDevice = info.physicalDevice;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        physicalDevice = nullptr;
+    }
+
+    if (physicalDevice)
+    {
+        midpoint_fix::ObserveVulkanPhysicalDevice(physicalDevice);
+        gModuleInventoryDirty.store(true, std::memory_order_release);
+    }
+    return original(info);
+}
+
+struct BaseStructureFields
+{
+    sl::BaseStructure* next = nullptr;
+    sl::StructType type{};
+    size_t version = 0;
+};
+
+inline bool ReadBaseStructureFields(const sl::BaseStructure* source, BaseStructureFields& fields) noexcept
+{
+    if (!source)
+        return false;
+    __try
+    {
+        fields.next = source->next;
+        fields.type = source->structType;
+        fields.version = source->structVersion;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+template <typename T>
+inline const T* FindStructInChain(const sl::BaseStructure* chain) noexcept
+{
+    constexpr size_t kMaximumChainNodes = 32;
+    const sl::BaseStructure* visited[kMaximumChainNodes]{};
+    for (size_t index = 0; chain && index < kMaximumChainNodes; ++index)
+    {
+        for (size_t prior = 0; prior < index; ++prior)
+        {
+            if (visited[prior] == chain)
+                return nullptr;
+        }
+        visited[index] = chain;
+        BaseStructureFields fields{};
+        if (!ReadBaseStructureFields(chain, fields))
+            return nullptr;
+        if (fields.type == T::s_structType)
+            return static_cast<const T*>(chain);
+        chain = fields.next;
+    }
+    return nullptr;
+}
+
+sl::Result HookSlSetData(const sl::BaseStructure* inputs, sl::CommandBuffer* cmdBuffer)
+{
+    auto* original = gOriginalSlSetData.load(std::memory_order_acquire);
+    if (!original && gDetourSlSetData)
+        original = gDetourSlSetData;
+    if (!original)
+        return sl::Result::eErrorNotInitialized;
+
+    const auto* options = FindStructInChain<sl::DLSSGOptions>(inputs);
+    const auto* viewport = FindStructInChain<sl::ViewportHandle>(inputs);
+
+    if (options)
+    {
+        const bool enabled = options->mode == sl::DLSSGMode::eOn
+            || options->mode == sl::DLSSGMode::eAuto
+            || options->mode == sl::DLSSGMode::eDynamic;
+        gGameFrameGenerationOn.store(enabled, std::memory_order_release);
+
+        if (viewport)
+            CaptureGameOptions(*viewport, *options);
+        else
+        {
+            std::lock_guard lock(gLastOptionsMutex);
+            if (gLastGameOptions.valid)
+                gLastGameOptions.options = CopyKnownOptions(*options, false);
+        }
+
+        if (enabled && gControlReady.load(std::memory_order_acquire) && BridgeReady())
+        {
+            const ControlSnapshot snapshot = ReadControlSnapshot();
+            sl::DLSSGOptions adjusted = BuildAdjustedOptions(*options, snapshot, false, false);
+
+            const sl::BaseStructure* head = inputs;
+            sl::BaseStructure* prevNode = nullptr;
+            for (const sl::BaseStructure* curr = inputs; curr; curr = curr->next)
+            {
+                if (curr == reinterpret_cast<const sl::BaseStructure*>(options))
+                    break;
+                prevNode = const_cast<sl::BaseStructure*>(curr);
+            }
+
+            adjusted.next = options->next;
+            if (prevNode)
+                prevNode->next = &adjusted;
+            else
+                head = &adjusted;
+
+            const sl::Result result = original(head, cmdBuffer);
+
+            if (prevNode)
+                prevNode->next = const_cast<sl::BaseStructure*>(reinterpret_cast<const sl::BaseStructure*>(options));
+
+            RecordAppliedControl(snapshot, result, false, false, false);
+            return result == sl::Result::eWarnOutOfVRAM ? sl::Result::eOk : result;
+        }
+    }
+
+    return original(inputs, cmdBuffer);
 }
 
 bool HookMainExecutableImport(const char* importedModule, const char* importedFunction,
@@ -1330,6 +1669,38 @@ bool InstallD3DDeviceHook()
     return installed;
 }
 
+bool InstallVulkanInfoHook()
+{
+    if (gDetourSlSetVulkanInfo)
+        return true;
+    void* original = nullptr;
+    const bool installed = HookMainExecutableImport("sl.interposer.dll",
+        "slSetVulkanInfo", reinterpret_cast<void*>(&HookSlSetVulkanInfo), original);
+    if (original)
+    {
+        gOriginalSetVulkanInfo.store(
+            reinterpret_cast<PFun_slSetVulkanInfo*>(original),
+            std::memory_order_release);
+    }
+    return installed || (gDetourSlSetVulkanInfo != nullptr);
+}
+
+bool InstallSetDataHook()
+{
+    if (gDetourSlSetData)
+        return true;
+    void* original = nullptr;
+    const bool installed = HookMainExecutableImport("sl.interposer.dll",
+        "slSetData", reinterpret_cast<void*>(&HookSlSetData), original);
+    if (original)
+    {
+        gOriginalSlSetData.store(
+            reinterpret_cast<PFun_slSetData*>(original),
+            std::memory_order_release);
+    }
+    return installed || (gDetourSlSetData != nullptr);
+}
+
 bool InstallUiTagHooks()
 {
     void* legacyOriginal = nullptr;
@@ -1394,20 +1765,65 @@ struct PatternPatchResult
     uint8_t* match = nullptr;
 };
 
+bool ContainsCI(const wchar_t* str, const wchar_t* sub) noexcept
+{
+    if (!str || !sub || !*sub) return false;
+    const size_t subLen = wcslen(sub);
+    const size_t strLen = wcslen(str);
+    if (strLen < subLen) return false;
+    for (size_t i = 0; i <= strLen - subLen; ++i)
+    {
+        if (_wcsnicmp(str + i, sub, subLen) == 0)
+            return true;
+    }
+    return false;
+}
+
+bool IsTargetModule(const wchar_t* moduleName, const wchar_t* fullPath)
+{
+    if (moduleName)
+    {
+        if (ContainsCI(moduleName, L"dlss")
+            || ContainsCI(moduleName, L"nvngx")
+            || ContainsCI(moduleName, L"interposer")
+            || ContainsCI(moduleName, L"sl.")
+            || ContainsCI(moduleName, L"sl_")
+            || ContainsCI(moduleName, L"nvapi"))
+            return true;
+    }
+
+    if (fullPath)
+    {
+        if (ContainsCI(fullPath, L"\\models\\")
+            || ContainsCI(fullPath, L"\\dlssg\\")
+            || ContainsCI(fullPath, L"sl_dlss_g")
+            || ContainsCI(fullPath, L"nvngx_dlssg"))
+            return true;
+    }
+    return false;
+}
+
 const IMAGE_NT_HEADERS64* ImageHeaders(HMODULE module)
 {
-    const auto* base = reinterpret_cast<const uint8_t*>(module);
-    if (!base)
+    if (!module)
         return nullptr;
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0
-        || static_cast<size_t>(dos->e_lfanew) > 1024 * 1024)
+    __try
+    {
+        const auto* base = reinterpret_cast<const uint8_t*>(module);
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0
+            || static_cast<size_t>(dos->e_lfanew) > 1024 * 1024)
+            return nullptr;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE
+            || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+            return nullptr;
+        return nt;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
         return nullptr;
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE
-        || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-        return nullptr;
-    return nt;
+    }
 }
 
 bool RvaRangeIsValid(const IMAGE_NT_HEADERS64* nt, DWORD rva, size_t size)
@@ -1422,30 +1838,37 @@ bool ModuleExportsFunction(HMODULE module, const char* expected)
     if (!nt || !expected)
         return false;
 
-    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-    if (!directory.VirtualAddress
-        || !RvaRangeIsValid(nt, directory.VirtualAddress, sizeof(IMAGE_EXPORT_DIRECTORY)))
-        return false;
-
-    const auto* base = reinterpret_cast<const uint8_t*>(module);
-    const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(
-        base + directory.VirtualAddress);
-    const size_t namesSize = static_cast<size_t>(exports->NumberOfNames) * sizeof(DWORD);
-    if (!exports->AddressOfNames
-        || !RvaRangeIsValid(nt, exports->AddressOfNames, namesSize))
-        return false;
-
-    const auto* names = reinterpret_cast<const DWORD*>(base + exports->AddressOfNames);
-    for (DWORD index = 0; index < exports->NumberOfNames; ++index)
+    __try
     {
-        const DWORD nameRva = names[index];
-        if (!RvaRangeIsValid(nt, nameRva, 1))
-            continue;
-        const char* name = reinterpret_cast<const char*>(base + nameRva);
-        const size_t remaining = nt->OptionalHeader.SizeOfImage - nameRva;
-        const size_t length = strnlen_s(name, remaining);
-        if (length < remaining && strcmp(name, expected) == 0)
-            return true;
+        const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (!directory.VirtualAddress
+            || !RvaRangeIsValid(nt, directory.VirtualAddress, sizeof(IMAGE_EXPORT_DIRECTORY)))
+            return false;
+
+        const auto* base = reinterpret_cast<const uint8_t*>(module);
+        const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(
+            base + directory.VirtualAddress);
+        const size_t namesSize = static_cast<size_t>(exports->NumberOfNames) * sizeof(DWORD);
+        if (!exports->AddressOfNames
+            || !RvaRangeIsValid(nt, exports->AddressOfNames, namesSize))
+            return false;
+
+        const auto* names = reinterpret_cast<const DWORD*>(base + exports->AddressOfNames);
+        for (DWORD index = 0; index < exports->NumberOfNames; ++index)
+        {
+            const DWORD nameRva = names[index];
+            if (!RvaRangeIsValid(nt, nameRva, 1))
+                continue;
+            const char* name = reinterpret_cast<const char*>(base + nameRva);
+            const size_t remaining = nt->OptionalHeader.SizeOfImage - nameRva;
+            const size_t length = strnlen_s(name, remaining);
+            if (length < remaining && strcmp(name, expected) == 0)
+                return true;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
     }
     return false;
 }
@@ -1458,38 +1881,44 @@ PatternPatchResult PatchUniqueExecutablePattern(
     if (!nt)
         return {};
 
-    const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
     uint8_t* match = nullptr;
     size_t matchCount = 0;
-    for (unsigned index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section)
+    __try
     {
-        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0)
-            continue;
-        auto* begin = const_cast<uint8_t*>(base + section->VirtualAddress);
-        if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage)
-            continue;
-        const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
-        const size_t size = std::min<size_t>(available,
-            std::max<size_t>(section->Misc.VirtualSize, section->SizeOfRawData));
-        if (size < patch.patternSize)
-            continue;
-        const size_t suffixOffset = patch.patchOffset + patch.patchSize;
-        for (size_t offset = 0; offset + patch.patternSize <= size; ++offset)
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned index = 0; index < nt->FileHeader.NumberOfSections; ++index, ++section)
         {
-            const bool prefixMatches = patch.patchOffset == 0
-                || memcmp(begin + offset, patch.pattern, patch.patchOffset) == 0;
-            const bool suffixMatches = suffixOffset == patch.patternSize
-                || memcmp(begin + offset + suffixOffset, patch.pattern + suffixOffset,
-                    patch.patternSize - suffixOffset) == 0;
-            const auto* candidate = begin + offset + patch.patchOffset;
-            const bool patchBytesMatch = memcmp(candidate, patch.original, patch.patchSize) == 0
-                || memcmp(candidate, patch.replacement, patch.patchSize) == 0;
-            if (prefixMatches && suffixMatches && patchBytesMatch)
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0)
+                continue;
+            auto* begin = const_cast<uint8_t*>(base + section->VirtualAddress);
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage)
+                continue;
+            const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
+            const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+            if (size < patch.patternSize)
+                continue;
+            const size_t suffixOffset = patch.patchOffset + patch.patchSize;
+            for (size_t offset = 0; offset + patch.patternSize <= size; ++offset)
             {
-                match = begin + offset;
-                ++matchCount;
+                const bool prefixMatches = patch.patchOffset == 0
+                    || memcmp(begin + offset, patch.pattern, patch.patchOffset) == 0;
+                const bool suffixMatches = suffixOffset == patch.patternSize
+                    || memcmp(begin + offset + suffixOffset, patch.pattern + suffixOffset,
+                        patch.patternSize - suffixOffset) == 0;
+                const auto* candidate = begin + offset + patch.patchOffset;
+                const bool patchBytesMatch = memcmp(candidate, patch.original, patch.patchSize) == 0
+                    || memcmp(candidate, patch.replacement, patch.patchSize) == 0;
+                if (prefixMatches && suffixMatches && patchBytesMatch)
+                {
+                    match = begin + offset;
+                    ++matchCount;
+                }
             }
         }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return {};
     }
 
     if (matchCount == 0)
@@ -1561,7 +1990,8 @@ void RecomputeModuleStateLocked()
         }
         if (record.ngxCandidate)
             ++ngxCandidates;
-        if (record.ngxPatched && record.ngxTemporalPatched)
+        const bool temporalOk = record.ngxTemporalPatched || midpoint_fix::Ready();
+        if (record.ngxPatched && temporalOk)
         {
             ++patchedNgx;
             ngxRouteBits |= ClassifyLoadedRoute(record.path);
@@ -1587,6 +2017,580 @@ void LogModuleInventory(const ModuleRecord& record)
         record.path.c_str());
 }
 
+bool PatchStreamlineFlipMetering(HMODULE module, const wchar_t* path)
+{
+    if (!module) return false;
+    const auto* nt = ImageHeaders(module);
+    if (!nt) return false;
+
+    constexpr char kFlipMarker[] = "FG1 DLL has been detected";
+    constexpr size_t kMarkerLen = sizeof(kFlipMarker) - 1;
+    auto* base = reinterpret_cast<uint8_t*>(module);
+
+    const uint8_t* marker = nullptr;
+    unsigned int wantOffset = 0;
+    int wantValue = -1;
+    size_t sitesPatched = 0;
+
+    __try
+    {
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections && !marker; ++i, ++section)
+        {
+            if ((section->Characteristics & IMAGE_SCN_MEM_READ) == 0) continue;
+            uint8_t* start = base + section->VirtualAddress;
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage) continue;
+            const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
+            const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+            if (size < kMarkerLen) continue;
+            for (size_t off = 0; off + kMarkerLen <= size; ++off)
+            {
+                if (memcmp(start + off, kFlipMarker, kMarkerLen) == 0)
+                {
+                    marker = start + off;
+                    break;
+                }
+            }
+        }
+        if (!marker) return false;
+
+        section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections && wantValue < 0; ++i, ++section)
+        {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+            uint8_t* start = base + section->VirtualAddress;
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage) continue;
+            const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
+            const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+            if (size < 8) continue;
+            for (size_t off = 0; off + 8 <= size && wantValue < 0; ++off)
+            {
+                if (!(start[off] == 0x48 || start[off] == 0x4C)) continue;
+                if (start[off + 1] != 0x8D) continue;
+                if ((start[off + 2] & 0xC7) != 0x05) continue;
+                int disp = 0;
+                memcpy(&disp, start + off + 3, sizeof(disp));
+                if (start + off + 7 + disp != marker) continue;
+
+                const size_t window = 0x200;
+                const size_t limit = (off + window < size) ? (off + window) : size;
+                for (size_t w = off; w + 7 <= limit; ++w)
+                {
+                    if (start[w] != 0xC6) continue;
+                    if (start[w + 1] < 0x80 || start[w + 1] > 0xBF) continue;
+                    unsigned int field = 0;
+                    memcpy(&field, start + w + 2, sizeof(field));
+                    const uint8_t imm = start[w + 6];
+                    if (field <= 0x100 || field >= 0x20000) continue;
+                    if (imm > 1) continue;
+                    wantOffset = field;
+                    wantValue = imm;
+                    break;
+                }
+            }
+        }
+
+        if (wantValue < 0)
+        {
+            Log(L"Located DLSS-G plugin (%s) but could not extract flip metering state", path ? path : L"");
+            return false;
+        }
+
+        const uint8_t opposite = static_cast<uint8_t>(1 - wantValue);
+        section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+        {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+            uint8_t* start = base + section->VirtualAddress;
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage) continue;
+            const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
+            const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+            if (size < 7) continue;
+            for (size_t off = 0; off + 7 <= size; ++off)
+            {
+                // C6 /0 disp32 imm8 form
+                if (start[off] == 0xC6)
+                {
+                    if (start[off + 1] < 0x80 || start[off + 1] > 0xBF) continue;
+                    unsigned int field = 0;
+                    memcpy(&field, start + off + 2, sizeof(field));
+                    if (field != wantOffset) continue;
+                    if (start[off + 6] != opposite) continue;
+
+                    DWORD oldProtect = 0;
+                    if (VirtualProtect(start + off + 6, 1, PAGE_EXECUTE_READWRITE, &oldProtect))
+                    {
+                        start[off + 6] = static_cast<uint8_t>(wantValue);
+                        DWORD ignored = 0;
+                        VirtualProtect(start + off + 6, 1, oldProtect, &ignored);
+                        FlushInstructionCache(GetCurrentProcess(), start + off + 6, 1);
+                        ++sitesPatched;
+                    }
+                    continue;
+                }
+
+                // 40 88 /r disp32 form
+                if (start[off] == 0x40 && start[off + 1] == 0x88)
+                {
+                    const uint8_t modrm = start[off + 2];
+                    if (modrm < 0x80 || modrm > 0xBF) continue;
+                    const uint8_t rm = static_cast<uint8_t>(modrm & 7);
+                    if (rm == 4) continue;
+                    unsigned int field = 0;
+                    memcpy(&field, start + off + 3, sizeof(field));
+                    if (field != wantOffset) continue;
+
+                    uint8_t replacement[7] = {
+                        0xC6, static_cast<uint8_t>(0x80 | rm), 0, 0, 0, 0, static_cast<uint8_t>(wantValue)
+                    };
+                    memcpy(replacement + 2, &wantOffset, sizeof(wantOffset));
+
+                    DWORD oldProtect = 0;
+                    if (VirtualProtect(start + off, 7, PAGE_EXECUTE_READWRITE, &oldProtect))
+                    {
+                        memcpy(start + off, replacement, 7);
+                        DWORD ignored = 0;
+                        VirtualProtect(start + off, 7, oldProtect, &ignored);
+                        FlushInstructionCache(GetCurrentProcess(), start + off, 7);
+                        ++sitesPatched;
+                    }
+                }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+
+    if (sitesPatched > 0)
+    {
+        gFlipMeteringOffset.store(wantOffset, std::memory_order_relaxed);
+        gFlipMeteringValue.store(static_cast<uint32_t>(wantValue), std::memory_order_relaxed);
+        gFlipMeteringPatched.store(true, std::memory_order_release);
+        Log(L"Streamline FlipMetering: forced software pacing (RSYNC) in %s (+0x%X pinned to %d at %zu sites)",
+            path ? path : L"", wantOffset, wantValue, sitesPatched);
+        return true;
+    }
+    return gFlipMeteringPatched.load(std::memory_order_relaxed);
+}
+
+bool PatchStreamlineCeilingClamp(HMODULE module, const wchar_t* path)
+{
+    if (!module) return false;
+    const auto* nt = ImageHeaders(module);
+    if (!nt) return false;
+    auto* base = reinterpret_cast<uint8_t*>(module);
+
+    const uint8_t prefix[] = {0x3B, 0xCA, 0x0F, 0x42};
+    __try
+    {
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+        {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+            uint8_t* start = base + section->VirtualAddress;
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage) continue;
+            const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
+            const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+            if (size < 10) continue;
+            for (size_t off = 0; off + 10 <= size; ++off)
+            {
+                if (start[off] != 0xBA) continue;
+                if (start[off + 2] != 0 || start[off + 3] != 0 || start[off + 4] != 0) continue;
+                if (memcmp(start + off + 5, prefix, sizeof(prefix)) != 0) continue;
+                const uint8_t ceiling = start[off + 1];
+                if (ceiling == 0 || ceiling > 8) continue;
+
+                const uint8_t lastByte = start[off + 9];
+                if (lastByte == 0xD2 || lastByte == 0x90)
+                {
+                    gAdvertisedMaxGenerated.store(ceiling, std::memory_order_release);
+                    return true;
+                }
+
+                if (lastByte == 0xD1)
+                {
+                    DWORD oldProtect = 0;
+                    if (VirtualProtect(start + off, 10, PAGE_EXECUTE_READWRITE, &oldProtect))
+                    {
+                        start[off + 9] = 0xD2;
+                        DWORD ignored = 0;
+                        VirtualProtect(start + off, 10, oldProtect, &ignored);
+                        FlushInstructionCache(GetCurrentProcess(), start + off, 10);
+                        gAdvertisedMaxGenerated.store(ceiling, std::memory_order_release);
+                        Log(L"Streamline ceiling bypass applied in %s (compiled max=%ux, cmovb bypassed)",
+                            path ? path : L"", ceiling + 1);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+    return false;
+}
+
+static bool SafeScanDlssgArchSites(const uint8_t* base, const IMAGE_NT_HEADERS64* nt,
+    uint8_t** outSites, size_t maxSites, size_t* outFound, size_t* outAlreadyPatched)
+{
+    if (!base || !nt || !outSites || !outFound || !outAlreadyPatched)
+        return false;
+    __try
+    {
+        constexpr uint8_t kArchOld = 0xB0;
+        constexpr uint8_t kArchNew = 0x90;
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+        {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+            const uint8_t* start = base + section->VirtualAddress;
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage) continue;
+            const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
+            const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+            if (size < 6) continue;
+            for (size_t off = 0; off + 6 <= size; ++off)
+            {
+                if (start[off] == 0x3D && start[off + 2] == 0x01 && start[off + 3] == 0x00 && start[off + 4] == 0x00)
+                {
+                    if (start[off + 1] == kArchOld && *outFound < maxSites)
+                        outSites[(*outFound)++] = const_cast<uint8_t*>(start + off + 1);
+                    else if (start[off + 1] == kArchNew)
+                        ++(*outAlreadyPatched);
+                    continue;
+                }
+                if (start[off] == 0x81 && start[off + 1] >= 0xF8 && start[off + 1] <= 0xFF
+                    && start[off + 3] == 0x01 && start[off + 4] == 0x00 && start[off + 5] == 0x00)
+                {
+                    if (start[off + 2] == kArchOld && *outFound < maxSites)
+                        outSites[(*outFound)++] = const_cast<uint8_t*>(start + off + 2);
+                    else if (start[off + 2] == kArchNew)
+                        ++(*outAlreadyPatched);
+                }
+            }
+        }
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+bool PatchDlssgArchGates(HMODULE module, const wchar_t* path)
+{
+    if (!module) return false;
+    const auto* nt = ImageHeaders(module);
+    if (!nt) return false;
+    auto* base = reinterpret_cast<uint8_t*>(module);
+
+    constexpr uint8_t kArchNew = 0x90; // 0x190 AD10x (Ada)
+
+    uint8_t* sites[64]{};
+    size_t sitesFound = 0;
+    size_t alreadyPatched = 0;
+    if (!SafeScanDlssgArchSites(base, nt, sites, _countof(sites), &sitesFound, &alreadyPatched))
+        return false;
+
+    size_t written = 0;
+    for (size_t i = 0; i < sitesFound; ++i)
+    {
+        uint8_t* site = sites[i];
+        DWORD oldProtect = 0;
+        if (VirtualProtect(site, 1, PAGE_EXECUTE_READWRITE, &oldProtect))
+        {
+            *site = kArchNew;
+            DWORD ignored = 0;
+            VirtualProtect(site, 1, oldProtect, &ignored);
+            FlushInstructionCache(GetCurrentProcess(), site, 1);
+            ++written;
+        }
+    }
+
+    if (written > 0)
+    {
+        Log(L"DLSS-G arch gates patched in %s: %zu site(s) rewrote 0x1b0 -> 0x190 (Ada)",
+            path ? path : L"", written);
+        return true;
+    }
+    return alreadyPatched > 0;
+}
+
+using PFun_slInit = sl::Result(const sl::Preferences&, uint64_t);
+PFun_slInit* gOriginalSlInit = nullptr;
+PFun_slGetFeatureFunction* gDetourSlGetFeatureFunction = nullptr;
+
+sl::Result HookSlInit(const sl::Preferences& pref, uint64_t sdkVersion)
+{
+    if (!gOriginalSlInit)
+        return sl::Result::eErrorNotInitialized;
+
+    const bool forceOta = gConfigForceOta.load(std::memory_order_relaxed);
+    sl::Preferences localPref = pref;
+    const uint64_t before = static_cast<uint64_t>(pref.flags);
+    constexpr uint64_t kOta = static_cast<uint64_t>(sl::PreferenceFlags::eAllowOTA) |
+                              static_cast<uint64_t>(sl::PreferenceFlags::eLoadDownloadedPlugins);
+    if (forceOta)
+    {
+        localPref.flags = static_cast<sl::PreferenceFlags>(before | kOta);
+    }
+    const sl::Result result = gOriginalSlInit(forceOta ? localPref : pref, sdkVersion);
+    Log(L"slInit intercepted: flags 0x%llX%s result=%d",
+        before, forceOta ? L" (forced OTA)" : L"", static_cast<int>(result));
+    return result;
+}
+
+void InstallInterposerDetours()
+{
+    if (gInterposerDetoursInstalled.load(std::memory_order_acquire))
+        return;
+
+    HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
+    if (!interposer)
+        return;
+
+    auto* getFeatureFn = reinterpret_cast<PFun_slGetFeatureFunction*>(
+        GetProcAddress(interposer, "slGetFeatureFunction"));
+    auto* initFn = reinterpret_cast<PFun_slInit*>(
+        GetProcAddress(interposer, "slInit"));
+    auto* vulkanInfoFn = reinterpret_cast<PFun_slSetVulkanInfo*>(
+        GetProcAddress(interposer, "slSetVulkanInfo"));
+    auto* setDataFn = reinterpret_cast<PFun_slSetData*>(
+        GetProcAddress(interposer, "slSetData"));
+
+    if (!getFeatureFn && !initFn && !vulkanInfoFn && !setDataFn)
+        return;
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    if (getFeatureFn)
+    {
+        gDetourSlGetFeatureFunction = getFeatureFn;
+        DetourAttach(reinterpret_cast<void**>(&gDetourSlGetFeatureFunction),
+                     reinterpret_cast<void*>(&HookSlGetFeatureFunction));
+    }
+    if (initFn)
+    {
+        gOriginalSlInit = initFn;
+        DetourAttach(reinterpret_cast<void**>(&gOriginalSlInit),
+                     reinterpret_cast<void*>(&HookSlInit));
+    }
+    if (vulkanInfoFn)
+    {
+        gDetourSlSetVulkanInfo = vulkanInfoFn;
+        DetourAttach(reinterpret_cast<void**>(&gDetourSlSetVulkanInfo),
+                     reinterpret_cast<void*>(&HookSlSetVulkanInfo));
+    }
+    if (setDataFn)
+    {
+        gDetourSlSetData = setDataFn;
+        DetourAttach(reinterpret_cast<void**>(&gDetourSlSetData),
+                     reinterpret_cast<void*>(&HookSlSetData));
+    }
+    const LONG status = DetourTransactionCommit();
+    if (status == NO_ERROR)
+    {
+        gInterposerDetoursInstalled.store(true, std::memory_order_release);
+        gLiveHookInstalled.store(true, std::memory_order_release);
+        if (gDetourSlGetFeatureFunction)
+            gOriginalGetFeatureFunction.store(gDetourSlGetFeatureFunction, std::memory_order_release);
+        if (gDetourSlSetVulkanInfo)
+            gOriginalSetVulkanInfo.store(gDetourSlSetVulkanInfo, std::memory_order_release);
+        if (gDetourSlSetData)
+            gOriginalSlSetData.store(gDetourSlSetData, std::memory_order_release);
+        Log(L"Direct Detours on sl.interposer.dll installed successfully (slGetFeatureFunction, slInit, slSetVulkanInfo, slSetData)");
+    }
+    else
+    {
+        Log(L"Failed to install direct Detours on sl.interposer.dll (status=%ld)", status);
+    }
+}
+
+void UninstallInterposerDetours()
+{
+    if (!gInterposerDetoursInstalled.load(std::memory_order_acquire))
+        return;
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    if (gDetourSlGetFeatureFunction)
+        DetourDetach(reinterpret_cast<void**>(&gDetourSlGetFeatureFunction),
+                     reinterpret_cast<void*>(&HookSlGetFeatureFunction));
+    if (gOriginalSlInit)
+        DetourDetach(reinterpret_cast<void**>(&gOriginalSlInit),
+                     reinterpret_cast<void*>(&HookSlInit));
+    if (gDetourSlSetVulkanInfo)
+        DetourDetach(reinterpret_cast<void**>(&gDetourSlSetVulkanInfo),
+                     reinterpret_cast<void*>(&HookSlSetVulkanInfo));
+    if (gDetourSlSetData)
+        DetourDetach(reinterpret_cast<void**>(&gDetourSlSetData),
+                     reinterpret_cast<void*>(&HookSlSetData));
+    DetourTransactionCommit();
+    gInterposerDetoursInstalled.store(false, std::memory_order_release);
+}
+
+using PFun_NvAPI_QueryInterface = void*(__stdcall*)(unsigned int InterfaceId);
+PFun_NvAPI_QueryInterface gRealNvAPI_QueryInterface = nullptr;
+std::atomic<bool> gNvApiHookInstalled{false};
+
+void* __stdcall HookNvAPI_QueryInterface(unsigned int interfaceId)
+{
+    constexpr unsigned int kNvAPI_D3D12_SetFlipConfig = 0xf3148c42;
+    if (interfaceId == kNvAPI_D3D12_SetFlipConfig && gConfigPatchFlipMetering.load(std::memory_order_relaxed))
+    {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true))
+            Log(L"NVAPI: NvAPI_D3D12_SetFlipConfig (0xF3148C42) query intercepted -> returning nullptr (OptiScaler FlipMetering bypass)");
+        return nullptr;
+    }
+    if (gRealNvAPI_QueryInterface)
+        return gRealNvAPI_QueryInterface(interfaceId);
+    return nullptr;
+}
+
+void InstallNvApiHook()
+{
+    if (gNvApiHookInstalled.load(std::memory_order_acquire))
+        return;
+
+    HMODULE nvapi = GetModuleHandleW(L"nvapi64.dll");
+    if (!nvapi)
+        return;
+
+    auto* queryInterface = reinterpret_cast<PFun_NvAPI_QueryInterface>(
+        GetProcAddress(nvapi, "nvapi_QueryInterface"));
+    if (!queryInterface)
+        return;
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    gRealNvAPI_QueryInterface = queryInterface;
+    DetourAttach(reinterpret_cast<void**>(&gRealNvAPI_QueryInterface),
+                 reinterpret_cast<void*>(&HookNvAPI_QueryInterface));
+    if (DetourTransactionCommit() == NO_ERROR)
+    {
+        gNvApiHookInstalled.store(true, std::memory_order_release);
+        Log(L"NVAPI: Hooked nvapi_QueryInterface (OptiScaler FlipMetering bypass: %s)",
+            gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? L"ENABLED" : L"DISABLED");
+    }
+}
+
+void UninstallNvApiHook()
+{
+    if (!gNvApiHookInstalled.load(std::memory_order_acquire))
+        return;
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    if (gRealNvAPI_QueryInterface)
+        DetourDetach(reinterpret_cast<void**>(&gRealNvAPI_QueryInterface),
+                     reinterpret_cast<void*>(&HookNvAPI_QueryInterface));
+    DetourTransactionCommit();
+    gNvApiHookInstalled.store(false, std::memory_order_release);
+}
+
+using PFun_LoadLibraryW = HMODULE(WINAPI*)(LPCWSTR);
+using PFun_LoadLibraryExW = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
+
+PFun_LoadLibraryW gRealLoadLibraryW = nullptr;
+PFun_LoadLibraryExW gRealLoadLibraryExW = nullptr;
+std::atomic<bool> gLoadHooksInstalled{false};
+
+ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPath);
+void OnPotentialModuleLoaded(HMODULE module, LPCWSTR name);
+
+HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
+{
+    HMODULE mod = gRealLoadLibraryW(lpLibFileName);
+    if (mod && lpLibFileName && reinterpret_cast<uintptr_t>(lpLibFileName) >= 0x10000)
+    {
+        if (IsTargetModule(lpLibFileName, lpLibFileName))
+            OnPotentialModuleLoaded(mod, lpLibFileName);
+    }
+    return mod;
+}
+
+HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
+{
+    HMODULE mod = gRealLoadLibraryExW(lpLibFileName, hFile, dwFlags);
+    constexpr DWORD kDataOnly = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE;
+    if (mod && lpLibFileName && reinterpret_cast<uintptr_t>(lpLibFileName) >= 0x10000 && (dwFlags & kDataOnly) == 0)
+    {
+        if (IsTargetModule(lpLibFileName, lpLibFileName))
+            OnPotentialModuleLoaded(mod, lpLibFileName);
+    }
+    return mod;
+}
+
+void InstallLoadLibraryHooks()
+{
+    if (gLoadHooksInstalled.load(std::memory_order_acquire))
+        return;
+
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (!kernel32)
+        return;
+
+    gRealLoadLibraryW = reinterpret_cast<PFun_LoadLibraryW>(GetProcAddress(kernel32, "LoadLibraryW"));
+    gRealLoadLibraryExW = reinterpret_cast<PFun_LoadLibraryExW>(GetProcAddress(kernel32, "LoadLibraryExW"));
+    if (!gRealLoadLibraryW || !gRealLoadLibraryExW)
+        return;
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(reinterpret_cast<void**>(&gRealLoadLibraryW), reinterpret_cast<void*>(&HookLoadLibraryW));
+    DetourAttach(reinterpret_cast<void**>(&gRealLoadLibraryExW), reinterpret_cast<void*>(&HookLoadLibraryExW));
+    if (DetourTransactionCommit() == NO_ERROR)
+    {
+        gLoadHooksInstalled.store(true, std::memory_order_release);
+        Log(L"Early LoadLibraryW/ExW hooks installed on kernel32.dll");
+    }
+}
+
+void UninstallLoadLibraryHooks()
+{
+    if (!gLoadHooksInstalled.load(std::memory_order_acquire))
+        return;
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    if (gRealLoadLibraryW)
+        DetourDetach(reinterpret_cast<void**>(&gRealLoadLibraryW), reinterpret_cast<void*>(&HookLoadLibraryW));
+    if (gRealLoadLibraryExW)
+        DetourDetach(reinterpret_cast<void**>(&gRealLoadLibraryExW), reinterpret_cast<void*>(&HookLoadLibraryExW));
+    DetourTransactionCommit();
+    gLoadHooksInstalled.store(false, std::memory_order_release);
+}
+
+void OnPotentialModuleLoaded(HMODULE module, LPCWSTR name)
+{
+    if (!module || !name || reinterpret_cast<uintptr_t>(name) < 0x10000) return;
+    if (!IsTargetModule(name, name)) return;
+    if (ContainsCI(name, L"nvapi"))
+    {
+        InstallNvApiHook();
+    }
+    if (ContainsCI(name, L"sl.interposer"))
+    {
+        InstallInterposerDetours();
+        InstallFeatureFunctionHook();
+        InstallD3DDeviceHook();
+        InstallVulkanInfoHook();
+        InstallSetDataHook();
+        InstallUiTagHooks();
+    }
+    if (ContainsCI(name, L"nvngx_dlssg")
+        || ContainsCI(name, L"\\models\\dlssg\\")
+        || ContainsCI(name, L"sl.dlss_g")
+        || ContainsCI(name, L"sl_dlss_g_"))
+    {
+        gModuleInventoryDirty.store(true, std::memory_order_release);
+    }
+}
+
 ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPath)
 {
     if (!module)
@@ -1603,12 +2607,12 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
             });
         if (existing != gModuleRecords.end())
         {
-            if (existing->ngxPatched && !existing->ngxTemporalPatched
-                && midpoint_fix::AdapterVerified())
+            if (existing->ngxPatched && !existing->ngxTemporalPatched)
             {
                 existing->ngxTemporalPatched = midpoint_fix::PatchProvider(
                     module, path.c_str());
-                RecomputeModuleStateLocked();
+                if (existing->ngxTemporalPatched)
+                    RecomputeModuleStateLocked();
             }
             if (gLogReady.load(std::memory_order_acquire) && !existing->inventoryLogged)
             {
@@ -1625,7 +2629,8 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
             record.wrapperExport = ModuleExportsFunction(module, "slGetPluginFunction");
             record.ngxExport =
                 dlssg_provider_policy::IsDlssgImplementationModule(module)
-                && ModuleExportsFunction(module, "NVSDK_NGX_D3D12_CreateFeature")
+                && (ModuleExportsFunction(module, "NVSDK_NGX_D3D12_CreateFeature")
+                    || ModuleExportsFunction(module, "NVSDK_NGX_VULKAN_CreateFeature"))
                 && ModuleExportsFunction(module, "NVSDK_NGX_GetGPUArchitecture");
             if (!record.wrapperExport && !record.ngxExport)
                 return record;
@@ -1641,17 +2646,21 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
                     SetWrapperMaximum(record,
                         RequestedMaximumGeneratedFrames(ReadControlSnapshot().control));
                 }
+                const bool ceilingPatched = PatchStreamlineCeilingClamp(module, path.c_str());
+                record.wrapperCandidate = record.wrapperCandidate || ceilingPatched;
+                record.wrapperPatched = record.wrapperPatched || ceilingPatched;
             }
             if (record.ngxExport)
             {
+                const bool archGatesPatched = PatchDlssgArchGates(module, path.c_str());
                 const PatternPatchResult result =
                     PatchUniqueExecutablePattern(module, path, kNgxPatch);
-                record.ngxCandidate = result.candidate;
-                record.ngxPatched = result.patched;
-                if (record.ngxPatched && midpoint_fix::AdapterVerified())
+                record.ngxCandidate = result.candidate || archGatesPatched;
+                record.ngxPatched = result.patched || archGatesPatched;
+                if (record.ngxPatched || archGatesPatched)
                 {
-                    record.ngxTemporalPatched = midpoint_fix::PatchProvider(
-                        module, path.c_str());
+                    record.ngxTemporalPatched =
+                        midpoint_fix::PatchProvider(module, path.c_str());
                 }
             }
             record.inventoryLogged = gLogReady.load(std::memory_order_acquire);
@@ -1721,6 +2730,11 @@ void InspectAlreadyLoadedModules()
     {
         do
         {
+            if (!IsTargetModule(entry.szModule, entry.szExePath))
+            {
+                entry.dwSize = sizeof(entry);
+                continue;
+            }
             HMODULE module = reinterpret_cast<HMODULE>(entry.modBaseAddr);
             loadedModules.push_back(module);
             InspectLoadedModule(module, entry.szExePath);
@@ -1810,18 +2824,88 @@ bool RegisterDllNotification()
     return registered;
 }
 
+bool ProcessStandaloneHotkeys(ControlConfig& control)
+{
+    const bool ctrlPressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool altPressed = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    if (!ctrlPressed || !altPressed)
+        return false;
+
+    static uint64_t sLastHotkeyTick = 0;
+    const uint64_t now = GetTickCount64();
+    if (now - sLastHotkeyTick < 200)
+        return false;
+
+    bool changed = false;
+    for (uint32_t mult = 2; mult <= 6; ++mult)
+    {
+        const int keyChar = '0' + mult;
+        const int keyNumpad = VK_NUMPAD0 + mult;
+        if ((GetAsyncKeyState(keyChar) & 0x8000) != 0 || (GetAsyncKeyState(keyNumpad) & 0x8000) != 0)
+        {
+            control.multiplier = mult;
+            control.dynamic = false;
+            changed = true;
+            Log(L"[HOTKEY] Multiplier set to %ux (fixed mode)", mult);
+            break;
+        }
+    }
+
+    if (!changed && (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0) // PageUp
+    {
+        if (control.multiplier < 6)
+            control.multiplier++;
+        control.dynamic = false;
+        changed = true;
+        Log(L"[HOTKEY] Multiplier increased to %ux (fixed mode)", control.multiplier);
+    }
+    else if (!changed && (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0) // PageDown
+    {
+        if (control.multiplier > 2)
+            control.multiplier--;
+        control.dynamic = false;
+        changed = true;
+        Log(L"[HOTKEY] Multiplier decreased to %ux (fixed mode)", control.multiplier);
+    }
+    else if (!changed && (GetAsyncKeyState('D') & 0x8000) != 0)
+    {
+        control.dynamic = !control.dynamic;
+        if (control.dynamic && control.dynamicTargetFrameRate == 0)
+            control.dynamicTargetFrameRate = 120;
+        changed = true;
+        if (control.dynamic)
+        {
+            Log(L"[HOTKEY] Mode toggled: DYNAMIC (target=%u FPS)",
+                control.dynamicTargetFrameRate);
+        }
+        else
+        {
+            Log(L"[HOTKEY] Mode toggled: FIXED (multiplier=%ux)",
+                control.multiplier);
+        }
+    }
+
+    if (changed)
+        sLastHotkeyTick = now;
+
+    return changed;
+}
+
 DWORD WINAPI PatchWorker(void* context)
 {
     const DWORD pid = GetCurrentProcessId();
-    wchar_t tempDirectory[MAX_PATH]{};
-    DWORD tempLength = GetTempPathW(_countof(tempDirectory), tempDirectory);
     std::wstring logPath;
-    if (tempLength > 0 && tempLength < _countof(tempDirectory))
+    if (!gLog)
     {
-        wchar_t logName[64]{};
-        swprintf_s(logName, L"MfgUnlock-%lu.log", static_cast<unsigned long>(pid));
-        logPath = JoinPath(tempDirectory, logName);
-        gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+        wchar_t tempDirectory[MAX_PATH]{};
+        DWORD tempLength = GetTempPathW(_countof(tempDirectory), tempDirectory);
+        if (tempLength > 0 && tempLength < _countof(tempDirectory))
+        {
+            wchar_t logName[64]{};
+            swprintf_s(logName, L"RTX40MFG-%lu.log", static_cast<unsigned long>(pid));
+            logPath = JoinPath(tempDirectory, logName);
+            gLog = _wfsopen(logPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+        }
     }
     gLogReady.store(gLog != nullptr, std::memory_order_release);
 
@@ -1857,8 +2941,14 @@ DWORD WINAPI PatchWorker(void* context)
     Log(L"Streamline feature-function interception installed: %d", liveHookInstalled);
     Log(L"Streamline D3D device interception installed: %d",
         InstallD3DDeviceHook());
+    Log(L"Streamline Vulkan info interception installed: %d",
+        InstallVulkanInfoHook());
+    Log(L"Streamline SetData interception installed: %d",
+        InstallSetDataHook());
     const bool uiTagHookInstalled = InstallUiTagHooks();
     Log(L"Streamline UI tag interception installed: %d", uiTagHookInstalled);
+    InstallInterposerDetours();
+    InstallNvApiHook();
     InspectAlreadyLoadedModules();
     FlushModuleInventoryToLog();
     Log(L"Loaded-module discovery initialized: ready=%d route=%hs wrappers=%u/%u ngx=%u/%u",
@@ -1904,9 +2994,20 @@ DWORD WINAPI PatchWorker(void* context)
     std::string previousRoute = PatchRouteName();
     for (;;)
     {
-        Sleep(100);
-        const bool retryMidpoint = ++inventoryTicks >= 10
-            && midpoint_fix::AdapterVerified() && !midpoint_fix::Ready();
+        if (gStopWorker.load(std::memory_order_relaxed))
+            break;
+        Sleep(50);
+        if (ProcessStandaloneHotkeys(activeControl))
+        {
+            StoreControl(activeControl);
+            PublishLiveBridge(activeControl);
+            WriteControlFile(gConfigPath, activeControl);
+            ReadLastWriteTime(gConfigPath, configWriteTime);
+            WriteBridgeStatus(activeControl, pid);
+            sl::ViewportHandle vp{};
+            ReapplyPendingControl(vp);
+        }
+        const bool retryMidpoint = ++inventoryTicks >= 10 && !midpoint_fix::Ready();
         if (gModuleInventoryDirty.exchange(false, std::memory_order_acq_rel)
             || retryMidpoint)
         {
@@ -1959,6 +3060,7 @@ DWORD WINAPI PatchWorker(void* context)
             heartbeatTicks = 0;
         }
     }
+    return 0;
 }
 }
 
@@ -1967,17 +3069,36 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(instance);
+        proxy::Initialize(instance);
         midpoint_fix::SetLogCallback(&MidpointLog);
         wchar_t executablePath[32768]{};
         GetModuleFileNameW(nullptr, executablePath, _countof(executablePath));
         gExecutableDirectory = ParentPath(executablePath);
+        InitLogging(instance, gExecutableDirectory);
         gLiveHookInstalled.store(InstallFeatureFunctionHook(), std::memory_order_release);
         InstallD3DDeviceHook();
+        InstallVulkanInfoHook();
+        InstallSetDataHook();
         InstallUiTagHooks();
+        InstallInterposerDetours();
+        InstallLoadLibraryHooks();
         RegisterDllNotification();
         HANDLE thread = CreateThread(nullptr, 0, PatchWorker, instance, 0, nullptr);
         if (thread)
             CloseHandle(thread);
+    }
+    else if (reason == DLL_PROCESS_DETACH)
+    {
+        gStopWorker.store(true, std::memory_order_release);
+        UninstallNvApiHook();
+        UninstallLoadLibraryHooks();
+        UninstallInterposerDetours();
+        proxy::Shutdown();
+        if (gLog)
+        {
+            fclose(gLog);
+            gLog = nullptr;
+        }
     }
     return TRUE;
 }

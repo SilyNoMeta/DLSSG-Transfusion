@@ -1,0 +1,19 @@
+LIBRARY version
+EXPORTS
+    GetFileVersionInfoA = Proxy_GetFileVersionInfoA @1
+    GetFileVersionInfoByHandle = Proxy_GetFileVersionInfoByHandle @2
+    GetFileVersionInfoExA = Proxy_GetFileVersionInfoExA @3
+    GetFileVersionInfoExW = Proxy_GetFileVersionInfoExW @4
+    GetFileVersionInfoSizeA = Proxy_GetFileVersionInfoSizeA @5
+    GetFileVersionInfoSizeExA = Proxy_GetFileVersionInfoSizeExA @6
+    GetFileVersionInfoSizeExW = Proxy_GetFileVersionInfoSizeExW @7
+    GetFileVersionInfoSizeW = Proxy_GetFileVersionInfoSizeW @8
+    GetFileVersionInfoW = Proxy_GetFileVersionInfoW @9
+    VerFindFileA = Proxy_VerFindFileA @10
+    VerFindFileW = Proxy_VerFindFileW @11
+    VerInstallFileA = Proxy_VerInstallFileA @12
+    VerInstallFileW = Proxy_VerInstallFileW @13
+    VerLanguageNameA = Proxy_VerLanguageNameA @14
+    VerLanguageNameW = Proxy_VerLanguageNameW @15
+    VerQueryValueA = Proxy_VerQueryValueA @16
+    VerQueryValueW = Proxy_VerQueryValueW @17

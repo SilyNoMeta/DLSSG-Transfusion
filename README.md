@@ -23,7 +23,23 @@ versions of `nvngx_dlss.dll`, `nvngx_dlssd.dll`, `nvngx_dlssnr.dll`,
 This is an unsupported research mod. Modes above 2x may cause artifacts,
 latency, frozen presentation, black screens, or crashes.
 
-## Install
+## Universal Multi-Game Proxy Injection
+
+The mod can be used in **any game** with NVIDIA DLSS Frame Generation and Streamline without requiring Cyber Engine Tweaks:
+1. Choose one proxy DLL from `dist/`:
+   - `version.dll` (Recommended for most modern games and Unreal Engine 4/5)
+   - `dxgi.dll` (For games initializing graphics early)
+   - `winmm.dll` (Alternative proxy)
+   - `RTX40MFG.asi` (For games with ASI loaders)
+2. Copy the DLL into the game executable directory.
+3. Use in-game hotkeys to switch multipliers on the fly:
+   - `Ctrl + Alt + 2..6`: Fixed 2x through 6x multiplier
+   - `Ctrl + Alt + PageUp` / `PageDown`: Increment / Decrement multiplier (Fixed Mode)
+   - `Ctrl + Alt + D`: Toggle between Fixed Mode and Dynamic Mode
+4. Detailed diagnostic logs are written directly to `RTX40MFG.log` in the game directory.
+5. See [INJECTION.md](INJECTION.md) for full instructions and troubleshooting.
+
+## Install (Cyberpunk 2077 with CET)
 
 Requires Cyberpunk 2077, Cyber Engine Tweaks, an RTX 40 series GPU, and DLSS
 Frame Generation enabled. CET 1.37.1 was used during development.
@@ -34,12 +50,6 @@ If Frame Generation is already active, toggle it Off and On (or restart the
 game) so Streamline rebuilds the feature with the requested shape. The release
 ZIP does not include `config.json`, so installing it preserves the selected
 mode.
-
-The v1.1 provider matrix covered 17 DLSS-G binaries: the five binaries in the
-four supported version triplets passed and all twelve others failed closed.
-Each passing provider was also checked beside renamed DLSS, DLSSD, DLSSNR, and
-DeepDVC siblings; only DLSS-G was admitted. These compatibility checks and FPS
-counters do not by themselves prove final-present image quality.
 
 ## How it works
 

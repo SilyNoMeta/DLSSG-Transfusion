@@ -1,22 +1,59 @@
 cmake_minimum_required(VERSION 3.24)
-project(RTX40MFGNative LANGUAGES CXX)
+project(RTX40MFGNative LANGUAGES CXX ASM_MASM)
 
 set(STREAMLINE_ROOT "" CACHE PATH "Path to the NVIDIA Streamline SDK directory")
 if(NOT EXISTS "${STREAMLINE_ROOT}/include/sl_dlss_g.h")
     message(FATAL_ERROR "Set STREAMLINE_ROOT to a Streamline SDK directory containing include/sl_dlss_g.h")
 endif()
 
-add_library(RTX40MFGAuto SHARED
+# Statically link C/C++ runtime (/MT) so the mod has zero external MSVC runtime dependency
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+set(COMMON_SOURCES
     patcher.cpp
     midpoint_fix.cpp
     dlssg_provider_policy.cpp
+    proxy.cpp
+    proxy_thunks.asm
 )
-target_compile_features(RTX40MFGAuto PRIVATE cxx_std_20)
-target_compile_definitions(RTX40MFGAuto PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_include_directories(RTX40MFGAuto PRIVATE "${STREAMLINE_ROOT}/include")
-target_link_libraries(RTX40MFGAuto PRIVATE bcrypt version)
-set_target_properties(RTX40MFGAuto PROPERTIES
-    PREFIX ""
-    SUFFIX ".asi"
-    OUTPUT_NAME "RTX40MFG"
+
+set(DETOURS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/detours")
+
+function(setup_mod_target TARGET_NAME OUTPUT_BASENAME DEF_FILE EXTENSION)
+    add_library(${TARGET_NAME} SHARED ${COMMON_SOURCES})
+    target_compile_features(${TARGET_NAME} PRIVATE cxx_std_20)
+    target_compile_definitions(${TARGET_NAME} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_include_directories(${TARGET_NAME} PRIVATE "${STREAMLINE_ROOT}/include" "${DETOURS_DIR}")
+    target_link_libraries(${TARGET_NAME} PRIVATE bcrypt version user32 "${DETOURS_DIR}/detours.lib")
+    if(DEF_FILE)
+        target_link_options(${TARGET_NAME} PRIVATE "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/${DEF_FILE}")
+    endif()
+    set_target_properties(${TARGET_NAME} PROPERTIES
+        PREFIX ""
+        SUFFIX "${EXTENSION}"
+        OUTPUT_NAME "${OUTPUT_BASENAME}"
+    )
+    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/dist"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${TARGET_NAME}>" "${CMAKE_BINARY_DIR}/dist/${OUTPUT_BASENAME}${EXTENSION}"
+        COMMENT "Copying ${OUTPUT_BASENAME}${EXTENSION} to dist/"
+    )
+endfunction()
+
+# 1. version.dll proxy target
+setup_mod_target(RTX40MFG_version "version" "version.def" ".dll")
+
+# 2. winmm.dll proxy target
+setup_mod_target(RTX40MFG_winmm "winmm" "winmm.def" ".dll")
+
+# 3. dxgi.dll proxy target
+setup_mod_target(RTX40MFG_dxgi "dxgi" "dxgi.def" ".dll")
+
+# 4. Standard ASI target (Ultimate ASI Loader / CET / RenoDX)
+setup_mod_target(RTX40MFGAuto "RTX40MFG" "" ".asi")
+
+# Also copy RTX40MFG.asi to RTX40MFG.dll in dist
+add_custom_command(TARGET RTX40MFGAuto POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:RTX40MFGAuto>" "${CMAKE_BINARY_DIR}/dist/RTX40MFG.dll"
+    COMMENT "Copying generic RTX40MFG.dll to dist/"
 )

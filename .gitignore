@@ -3,3 +3,5 @@
 /outputs/
 /test_runs/
 **/bridge_status.json
+tests/live_control_harness/build/
+*.zip
