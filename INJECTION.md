@@ -41,6 +41,8 @@ You can control the multiplier at any moment without pausing or exiting the game
 | **`Ctrl + Alt + PageUp`** | Increment Multiplier | Steps multiplier up by 1 (max 6x, sets Fixed Mode). |
 | **`Ctrl + Alt + PageDown`** | Decrement Multiplier | Steps multiplier down by 1 (min 2x, sets Fixed Mode). |
 | **`Ctrl + Alt + D`** | Toggle Dynamic Mode | Toggles between Dynamic and Fixed Mode (default 120 FPS target). |
+| **`Ctrl + Alt + Up` / `+`** | Increase Dynamic Target FPS | Steps dynamic target FPS up by 5 FPS (+Shift for 1 FPS fine adjustment). Enables Dynamic Mode. |
+| **`Ctrl + Alt + Down` / `-`** | Decrease Dynamic Target FPS | Steps dynamic target FPS down by 5 FPS (+Shift for 1 FPS fine adjustment). Enables Dynamic Mode. |
 
 Hotkeys automatically save the new configuration to `DLSSG-Transfusion.json` and reapply the setting instantly on the active render thread.
 

@@ -46,6 +46,8 @@ The mod can be used in **any game** with NVIDIA DLSS Frame Generation and Stream
    - `Ctrl + Alt + 2..6`: Fixed 2x through 6x multiplier
    - `Ctrl + Alt + PageUp` / `PageDown`: Increment / Decrement multiplier (Fixed Mode)
    - `Ctrl + Alt + D`: Toggle between Fixed Mode and Dynamic Mode
+   - `Ctrl + Alt + Up` / `+`: Increase Dynamic MFG target FPS (+5 FPS; hold Shift for 1 FPS fine adjustment)
+   - `Ctrl + Alt + Down` / `-`: Decrease Dynamic MFG target FPS (-5 FPS; hold Shift for 1 FPS fine adjustment)
 4. Detailed diagnostic logs are written directly to `DLSSG-Transfusion.log` in the game directory.
 5. See [INJECTION.md](INJECTION.md) for full instructions and troubleshooting.
 

@@ -3036,6 +3036,57 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
                 control.multiplier);
         }
     }
+    else if (!changed)
+    {
+        const bool shiftPressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        const uint32_t step = shiftPressed ? 1 : 5;
+
+        const bool upPressed = (GetAsyncKeyState(VK_UP) & 0x8000) != 0
+            || (GetAsyncKeyState(VK_OEM_PLUS) & 0x8000) != 0
+            || (GetAsyncKeyState(VK_ADD) & 0x8000) != 0;
+        const bool downPressed = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0
+            || (GetAsyncKeyState(VK_OEM_MINUS) & 0x8000) != 0
+            || (GetAsyncKeyState(VK_SUBTRACT) & 0x8000) != 0;
+
+        if (upPressed)
+        {
+            uint32_t newTarget = control.dynamicTargetFrameRate;
+            if (newTarget == 0)
+                newTarget = 60;
+            else if (newTarget + step <= 1000)
+                newTarget += step;
+            else
+                newTarget = 1000;
+
+            if (newTarget != control.dynamicTargetFrameRate || !control.dynamic)
+            {
+                control.dynamicTargetFrameRate = newTarget;
+                control.dynamic = true;
+                changed = true;
+                Log(L"[HOTKEY] Dynamic target FPS increased to %u FPS (dynamic mode enabled)",
+                    control.dynamicTargetFrameRate);
+            }
+        }
+        else if (downPressed)
+        {
+            uint32_t newTarget = control.dynamicTargetFrameRate;
+            if (newTarget == 0)
+                newTarget = 60;
+            else if (newTarget > 30 + step)
+                newTarget -= step;
+            else
+                newTarget = 30;
+
+            if (newTarget != control.dynamicTargetFrameRate || !control.dynamic)
+            {
+                control.dynamicTargetFrameRate = newTarget;
+                control.dynamic = true;
+                changed = true;
+                Log(L"[HOTKEY] Dynamic target FPS decreased to %u FPS (dynamic mode enabled)",
+                    control.dynamicTargetFrameRate);
+            }
+        }
+    }
 
     if (changed)
         sLastHotkeyTick = now;
