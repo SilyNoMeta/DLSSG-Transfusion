@@ -935,11 +935,22 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
     if (len <= 0) return false;
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        Log(L"[CONFIG] Failed to write config to %s (Win32 Error: %lu)", path.c_str(), GetLastError());
+        return false;
+    }
     DWORD written = 0;
     const BOOL res = WriteFile(file, json, static_cast<DWORD>(len), &written, nullptr);
     CloseHandle(file);
-    return res && written == static_cast<DWORD>(len);
+    if (res && written == static_cast<DWORD>(len))
+    {
+        Log(L"[CONFIG] Saved hotkey config to %s (multiplier=%ux mode=%s)",
+            path.c_str(), control.multiplier, control.dynamic ? L"dynamic" : L"fixed");
+        return true;
+    }
+    Log(L"[CONFIG] Incomplete write to %s (%lu / %d bytes written)", path.c_str(), written, len);
+    return false;
 }
 
 bool ReadLastWriteTime(const std::wstring& path, FILETIME& writeTime)
@@ -1702,8 +1713,8 @@ sl::Result HookSlSetData(const sl::BaseStructure* inputs, sl::CommandBuffer* cmd
         else
         {
             std::lock_guard lock(gLastOptionsMutex);
-            if (gLastGameOptions.valid)
-                gLastGameOptions.options = CopyKnownOptions(*options, false);
+            gLastGameOptions.options = CopyKnownOptions(*options, false);
+            gLastGameOptions.valid = true;
         }
 
         if (enabled && gControlReady.load(std::memory_order_acquire) && BridgeReady())
