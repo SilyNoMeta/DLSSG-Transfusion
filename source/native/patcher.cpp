@@ -280,15 +280,11 @@ void RecordPerfSample(uint32_t currentMultiplier)
     std::lock_guard lock(gPerfMutex);
     if (!gPerfCsv && !gPerfCsvPath.empty())
     {
-        gPerfCsv = _wfsopen(gPerfCsvPath.c_str(), L"a, ccs=UTF-8", _SH_DENYWR);
+        gPerfCsv = _wfsopen(gPerfCsvPath.c_str(), L"w", _SH_DENYNO);
         if (gPerfCsv)
         {
-            fseek(gPerfCsv, 0, SEEK_END);
-            if (ftell(gPerfCsv) == 0)
-            {
-                fprintf(gPerfCsv, "FrameIndex,TimeMs,DeltaMs,Multiplier,KernelMode\n");
-                fflush(gPerfCsv);
-            }
+            fprintf(gPerfCsv, "FrameIndex,TimeMs,DeltaMs,Multiplier,KernelMode\n");
+            fflush(gPerfCsv);
         }
     }
 
@@ -301,6 +297,9 @@ void RecordPerfSample(uint32_t currentMultiplier)
     }
 
     const double qpcFreq = static_cast<double>(gFpsCounterFrequency.QuadPart);
+    if (qpcFreq <= 0.0)
+        return;
+
     const double deltaMs = (static_cast<double>(now.QuadPart - gPerfStats.lastFrameQpc.QuadPart) * 1000.0) / qpcFreq;
     const double elapsedTotalMs = (static_cast<double>(now.QuadPart - gPerfStats.benchmarkStartQpc.QuadPart) * 1000.0) / qpcFreq;
     gPerfStats.lastFrameQpc = now;
@@ -332,7 +331,7 @@ void RecordPerfSample(uint32_t currentMultiplier)
     {
         gPerfStats.lastLogQpc = now;
         float sum = 0.0f;
-        std::vector<float> sortedDeltas(gPerfStats.windowCount);
+        float sortedDeltas[PerfStats::kWindowSize]{};
         for (size_t i = 0; i < gPerfStats.windowCount; ++i)
         {
             sum += gPerfStats.windowDeltas[i];
@@ -350,7 +349,7 @@ void RecordPerfSample(uint32_t currentMultiplier)
         const float jitterMs = std::sqrt(variance / static_cast<float>(gPerfStats.windowCount));
 
         // 1% Low is the 99th percentile frametime
-        std::sort(sortedDeltas.begin(), sortedDeltas.end());
+        std::sort(sortedDeltas, sortedDeltas + gPerfStats.windowCount);
         const size_t p99Index = static_cast<size_t>(static_cast<float>(gPerfStats.windowCount - 1) * 0.99f);
         const float p99Delta = sortedDeltas[p99Index];
         const float fps1PctLow = p99Delta > 0.0f ? (1000.0f / p99Delta) : 0.0f;
@@ -3080,19 +3079,6 @@ DWORD WINAPI PatchWorker(void* context)
     gStatusPath = JoinPath(ParentPath(gConfigPath), L"bridge_status.json");
     DeleteFileW(gStatusPath.c_str());
     gPerfCsvPath = JoinPath(ParentPath(gConfigPath), L"RTX40MFG_perf.csv");
-    if (gConfigLogPerformance.load(std::memory_order_relaxed))
-    {
-        std::lock_guard lock(gPerfMutex);
-        if (!gPerfCsv)
-        {
-            gPerfCsv = _wfsopen(gPerfCsvPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
-            if (gPerfCsv)
-            {
-                fprintf(gPerfCsv, "FrameIndex,TimeMs,DeltaMs,Multiplier,KernelMode\n");
-                fflush(gPerfCsv);
-            }
-        }
-    }
     const ControlConfig initialControl = ReadInitialControl();
     StoreControl(initialControl);
     midpoint_fix::SetBlackwellTransfusionEnabled(gConfigBlackwellTransfusion.load(std::memory_order_relaxed));
