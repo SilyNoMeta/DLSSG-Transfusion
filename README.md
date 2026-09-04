@@ -8,6 +8,16 @@ Dynamic defaults to a 4x ceiling. Its UI toggle allows experimental 5x and 6x.
 UI recomposition is requested only when matching HUDless and UI buffers are tagged.
 The panel reports rendered FPS and total DLSS output FPS.
 
+Version 1.3 introduces Blackwell Kernel Transfusion, backporting Blackwell
+sm_120 branchless cadence scatter arithmetic to Ada Lovelace sm_89 at runtime to
+eliminate micro-stutter drift under capped refresh rates (e.g. 138 FPS cap + VSync).
+It also adds real-time frame telemetry (rolling FPS, jitter std-dev, 1% lows, and
+RTX40MFG_perf.csv output), crash hardening against D3D12 E_ABORT, and OptiScaler
+Flip Metering bypass.
+
+Version 1.2 added multi-game standalone proxy DLLs (`version.dll`, `dxgi.dll`, `winmm.dll`),
+in-game hotkeys (`Ctrl + Alt + 2..6`), and automatic game capability limits.
+
 Version 1.1 restores the preserved D157 runtime and separates DLSS-G feature
 identity from version eligibility. A loaded module must expose the DLSS-G-specific
 `NVSDK_NGX_D3D12_PopulateDeviceParameters_Impl` export before its version is
@@ -21,7 +31,8 @@ versions of `nvngx_dlss.dll`, `nvngx_dlssd.dll`, `nvngx_dlssnr.dll`,
 `nvngx_deepdvc.dll`, or the other Streamline DLLs.
 
 This is an unsupported research mod. Modes above 2x may cause artifacts,
-latency, frozen presentation, black screens, or crashes.
+latency, frozen presentation, black screens, or crashes. On 8GB GPUs, 2x-3x (or
+4x with High/Medium textures) is recommended to prevent VRAM exhaustion.
 
 ## Universal Multi-Game Proxy Injection
 
