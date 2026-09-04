@@ -316,7 +316,8 @@ void RecordPerfSample(uint32_t currentMultiplier)
         ++gPerfStats.windowCount;
 
     const bool isBlackwell = midpoint_fix::IsBlackwellTransfusionActive();
-    const char* kernelMode = isBlackwell ? "Blackwell" : "Ada";
+    const size_t bwFatbins = midpoint_fix::GetTransfusedFatbinCount();
+    const char* kernelMode = isBlackwell ? (bwFatbins > 1 ? "Blackwell (Omni)" : "Blackwell") : "Ada";
 
     if (gPerfCsv)
     {
