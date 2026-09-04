@@ -721,66 +721,57 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 
     std::vector<DescriptorPatch> all_patches;
     std::vector<void*> all_allocations;
-    size_t bw_fatbins_count = 0;
 
-    if (gBlackwellTransfusionEnabled.load(std::memory_order_relaxed))
+    if (gBlackwellTransfusionEnabled.load(std::memory_order_relaxed) && temporal_fat != nullptr && selected_profile != nullptr)
     {
-        for (const auto& pair : fatbin_slots)
+        size_t bw_dummy = 0;
+        if (FindBlackwellPtxEntry(temporal_fat, temporal_fat_size, bw_dummy))
         {
-            const uint8_t* fat_ptr = pair.first;
-            const auto& slots = pair.second;
-            const size_t fat_size = static_cast<size_t>(ReadU64(fat_ptr + 8)) + kOuterHeader;
-
-            size_t bw_entry = 0;
-            if (!FindBlackwellPtxEntry(fat_ptr, fat_size, bw_entry))
-                continue;
-
             std::vector<uint8_t> rebuilt;
             std::string why;
-            if (!BuildBlackwellTransfusionFatbin(fat_ptr, fat_size, rebuilt, why))
+            if (BuildBlackwellTransfusionFatbin(temporal_fat, temporal_fat_size, rebuilt, why))
             {
-                Log(L"D157 midpoint fix: Blackwell transfusion skipped for fatbin at %p: %hs", fat_ptr, why.c_str());
-                continue;
-            }
+                void* mem = VirtualAlloc(nullptr, rebuilt.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (mem)
+                {
+                    std::memcpy(mem, rebuilt.data(), rebuilt.size());
+                    all_allocations.push_back(mem);
 
-            void* mem = VirtualAlloc(nullptr, rebuilt.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if (!mem)
+                    for (uint64_t* slot : temporal_slots)
+                    {
+                        DWORD old_protect = 0;
+                        if (VirtualProtect(slot, sizeof(uint64_t), PAGE_READWRITE, &old_protect) == 0) continue;
+                        all_patches.push_back({slot, *slot});
+                        *slot = reinterpret_cast<uint64_t>(mem);
+                        DWORD ignored = 0;
+                        VirtualProtect(slot, sizeof(uint64_t), old_protect, &ignored);
+                    }
+
+                    if (!all_patches.empty())
+                    {
+                        gBlackwellTransfusionActive.store(true, std::memory_order_release);
+                        gTransfusedFatbinCount.store(1, std::memory_order_release);
+                        gTransfusedDescriptorCount.store(all_patches.size(), std::memory_order_release);
+                        gPatchedModules.push_back({module, std::move(all_patches), std::move(all_allocations)});
+                        gReady.store(true, std::memory_order_release);
+                        gFailureCode.store(0, std::memory_order_release);
+
+                        Log(L"D157 midpoint fix: redirected %zu %hs descriptor(s) in %s to BLACKWELL TRANSFUSION (sm_120 -> sm_89, branchless, %zu bytes)",
+                            temporal_slots.size(), selected_profile->descriptor_name, path ? path : L"", rebuilt.size());
+                        return true;
+                    }
+                    else
+                    {
+                        VirtualFree(mem, 0, MEM_RELEASE);
+                        all_allocations.clear();
+                    }
+                }
+            }
+            else
             {
-                Log(L"D157 midpoint fix: memory allocation failed for rebuilt fatbin at %p", fat_ptr);
-                continue;
+                Log(L"D157 midpoint fix: Blackwell transfusion failed (%hs); falling back to Ada temporal patch", why.c_str());
             }
-            std::memcpy(mem, rebuilt.data(), rebuilt.size());
-            all_allocations.push_back(mem);
-
-            size_t patched_slots_for_fatbin = 0;
-            for (uint64_t* slot : slots)
-            {
-                DWORD old_protect = 0;
-                if (VirtualProtect(slot, sizeof(uint64_t), PAGE_READWRITE, &old_protect) == 0) continue;
-                all_patches.push_back({slot, *slot});
-                *slot = reinterpret_cast<uint64_t>(mem);
-                DWORD ignored = 0;
-                VirtualProtect(slot, sizeof(uint64_t), old_protect, &ignored);
-                ++patched_slots_for_fatbin;
-            }
-
-            if (patched_slots_for_fatbin > 0)
-                ++bw_fatbins_count;
         }
-    }
-
-    if (bw_fatbins_count > 0)
-    {
-        gBlackwellTransfusionActive.store(true, std::memory_order_release);
-        gTransfusedFatbinCount.store(bw_fatbins_count, std::memory_order_release);
-        gTransfusedDescriptorCount.store(all_patches.size(), std::memory_order_release);
-        gPatchedModules.push_back({module, std::move(all_patches), std::move(all_allocations)});
-        gReady.store(true, std::memory_order_release);
-        gFailureCode.store(0, std::memory_order_release);
-
-        Log(L"D157 midpoint fix: BLACKWELL OMNI-TRANSFUSION active — redirected %zu descriptor(s) across %zu fatbin(s) in %s (100%% pipeline sm_120 -> sm_89)",
-            gTransfusedDescriptorCount.load(std::memory_order_relaxed), bw_fatbins_count, path ? path : L"");
-        return true;
     }
 
     // Fallback path: Ada temporal midpoint fix on EstimateIntermMvecsScatter
