@@ -122,7 +122,7 @@ constexpr uint64_t kUiTagFreshnessMs = 2500;
 
 struct ControlConfig
 {
-    uint32_t multiplier = 2;
+    uint32_t multiplier = 4;
     bool dynamic = false;
     uint32_t dynamicTargetFrameRate = 0;
     bool dynamicExperimental56 = false;
@@ -3079,6 +3079,11 @@ DWORD WINAPI PatchWorker(void* context)
     const ControlConfig initialControl = ReadInitialControl();
     StoreControl(initialControl);
     midpoint_fix::SetBlackwellTransfusionEnabled(gConfigBlackwellTransfusion.load(std::memory_order_relaxed));
+    if (!IsRegularFile(gConfigPath))
+    {
+        if (WriteControlFile(gConfigPath, initialControl))
+            Log(L"[CONFIG] Created default configuration file at: %s", gConfigPath.c_str());
+    }
     FILETIME configWriteTime{};
     ReadLastWriteTime(gConfigPath, configWriteTime);
     Log(L"Initial control: mode=%s multiplier=%ux dynamicTarget=%u FPS "
