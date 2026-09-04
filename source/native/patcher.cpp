@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstdio>
@@ -233,6 +234,134 @@ void MidpointLog(const wchar_t* message)
 std::atomic<bool> gConfigForceOta{false};
 std::atomic<bool> gConfigPatchFlipMetering{true};
 std::atomic<bool> gConfigBlackwellTransfusion{true};
+std::atomic<bool> gConfigLogPerformance{true};
+
+std::wstring gPerfCsvPath;
+FILE* gPerfCsv = nullptr;
+std::mutex gPerfMutex;
+
+struct PerfStats
+{
+    uint64_t frameIndex = 0;
+    LARGE_INTEGER lastFrameQpc{};
+    LARGE_INTEGER benchmarkStartQpc{};
+    LARGE_INTEGER lastLogQpc{};
+    static constexpr size_t kWindowSize = 300;
+    float windowDeltas[kWindowSize]{};
+    size_t windowHead = 0;
+    size_t windowCount = 0;
+};
+PerfStats gPerfStats;
+
+void RecordPerfSample(uint32_t currentMultiplier)
+{
+    if (!gConfigLogPerformance.load(std::memory_order_relaxed))
+    {
+        if (gPerfCsv)
+        {
+            std::lock_guard lock(gPerfMutex);
+            if (gPerfCsv)
+            {
+                fflush(gPerfCsv);
+                fclose(gPerfCsv);
+                gPerfCsv = nullptr;
+            }
+        }
+        return;
+    }
+
+    LARGE_INTEGER now{};
+    if (!QueryPerformanceCounter(&now))
+        return;
+    if (gFpsCounterFrequency.QuadPart == 0
+        && !QueryPerformanceFrequency(&gFpsCounterFrequency))
+        return;
+
+    std::lock_guard lock(gPerfMutex);
+    if (!gPerfCsv && !gPerfCsvPath.empty())
+    {
+        gPerfCsv = _wfsopen(gPerfCsvPath.c_str(), L"a, ccs=UTF-8", _SH_DENYWR);
+        if (gPerfCsv)
+        {
+            fseek(gPerfCsv, 0, SEEK_END);
+            if (ftell(gPerfCsv) == 0)
+            {
+                fprintf(gPerfCsv, "FrameIndex,TimeMs,DeltaMs,Multiplier,KernelMode\n");
+                fflush(gPerfCsv);
+            }
+        }
+    }
+
+    if (gPerfStats.lastFrameQpc.QuadPart == 0)
+    {
+        gPerfStats.lastFrameQpc = now;
+        gPerfStats.benchmarkStartQpc = now;
+        gPerfStats.lastLogQpc = now;
+        return;
+    }
+
+    const double qpcFreq = static_cast<double>(gFpsCounterFrequency.QuadPart);
+    const double deltaMs = (static_cast<double>(now.QuadPart - gPerfStats.lastFrameQpc.QuadPart) * 1000.0) / qpcFreq;
+    const double elapsedTotalMs = (static_cast<double>(now.QuadPart - gPerfStats.benchmarkStartQpc.QuadPart) * 1000.0) / qpcFreq;
+    gPerfStats.lastFrameQpc = now;
+
+    // Filter out extreme pauses (loading screens, Alt-Tab > 1 sec)
+    if (deltaMs <= 0.1 || deltaMs > 1000.0)
+        return;
+
+    ++gPerfStats.frameIndex;
+    const float deltaF = static_cast<float>(deltaMs);
+    gPerfStats.windowDeltas[gPerfStats.windowHead] = deltaF;
+    gPerfStats.windowHead = (gPerfStats.windowHead + 1) % PerfStats::kWindowSize;
+    if (gPerfStats.windowCount < PerfStats::kWindowSize)
+        ++gPerfStats.windowCount;
+
+    const bool isBlackwell = midpoint_fix::IsBlackwellTransfusionActive();
+    const char* kernelMode = isBlackwell ? "Blackwell" : "Ada";
+
+    if (gPerfCsv)
+    {
+        fprintf(gPerfCsv, "%llu,%.2f,%.2f,%u,%s\n",
+            static_cast<unsigned long long>(gPerfStats.frameIndex),
+            elapsedTotalMs, deltaMs, currentMultiplier, kernelMode);
+    }
+
+    // Every 5 seconds: compute rolling mean, jitter (standard deviation), and 1% low
+    const double sinceLastLog = (static_cast<double>(now.QuadPart - gPerfStats.lastLogQpc.QuadPart) * 1000.0) / qpcFreq;
+    if (sinceLastLog >= 5000.0 && gPerfStats.windowCount >= 30)
+    {
+        gPerfStats.lastLogQpc = now;
+        float sum = 0.0f;
+        std::vector<float> sortedDeltas(gPerfStats.windowCount);
+        for (size_t i = 0; i < gPerfStats.windowCount; ++i)
+        {
+            sum += gPerfStats.windowDeltas[i];
+            sortedDeltas[i] = gPerfStats.windowDeltas[i];
+        }
+        const float meanDelta = sum / static_cast<float>(gPerfStats.windowCount);
+        const float meanFps = meanDelta > 0.0f ? (1000.0f / meanDelta) : 0.0f;
+
+        float variance = 0.0f;
+        for (size_t i = 0; i < gPerfStats.windowCount; ++i)
+        {
+            const float diff = gPerfStats.windowDeltas[i] - meanDelta;
+            variance += diff * diff;
+        }
+        const float jitterMs = std::sqrt(variance / static_cast<float>(gPerfStats.windowCount));
+
+        // 1% Low is the 99th percentile frametime
+        std::sort(sortedDeltas.begin(), sortedDeltas.end());
+        const size_t p99Index = static_cast<size_t>(static_cast<float>(gPerfStats.windowCount - 1) * 0.99f);
+        const float p99Delta = sortedDeltas[p99Index];
+        const float fps1PctLow = p99Delta > 0.0f ? (1000.0f / p99Delta) : 0.0f;
+
+        Log(L"[PERF] %ux | Kernel: %hs | FPS: %.1f (%.2fms) | Jitter: %.2fms | 1%% Low: %.1f FPS (Sample: %zu frames)",
+            currentMultiplier, kernelMode, meanFps, meanDelta, jitterMs, fps1PctLow, gPerfStats.windowCount);
+
+        if (gPerfCsv)
+            fflush(gPerfCsv);
+    }
+}
 
 uint8_t RequestedMaximumGeneratedFrames(const ControlConfig& control)
 {
@@ -487,7 +616,10 @@ void RecordDlssgStateResult(
     }
 
     if (fpsFrameSample)
+    {
         UpdateFpsTelemetry(currentMultiplier);
+        RecordPerfSample(validMultiplierUpdate ? currentMultiplier : previousMultiplier);
+    }
     if (state.structVersion >= sl::kStructVersion2)
         gNumFramesToGenerateMax.store(
             state.numFramesToGenerateMax, std::memory_order_relaxed);
@@ -751,6 +883,14 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control)
         }
     }
 
+    size_t perfOffset = 0;
+    if (FindJsonValue(content, "logPerformance", perfOffset))
+    {
+        bool logPerf = true;
+        if (TryParseBoolean(content, "logPerformance", logPerf))
+            gConfigLogPerformance.store(logPerf, std::memory_order_relaxed);
+    }
+
     control = parsed;
     return true;
 }
@@ -781,7 +921,8 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         "  \"dynamicExperimental56\": %s,\n"
         "  \"forceOTA\": %s,\n"
         "  \"patchFlipMetering\": %s,\n"
-        "  \"blackwellTransfusion\": %s\n"
+        "  \"blackwellTransfusion\": %s,\n"
+        "  \"logPerformance\": %s\n"
         "}\n",
         control.multiplier,
         control.dynamic ? "dynamic" : "fixed",
@@ -789,7 +930,8 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         control.dynamicExperimental56 ? "true" : "false",
         gConfigForceOta.load(std::memory_order_relaxed) ? "true" : "false",
         gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigBlackwellTransfusion.load(std::memory_order_relaxed) ? "true" : "false");
+        gConfigBlackwellTransfusion.load(std::memory_order_relaxed) ? "true" : "false",
+        gConfigLogPerformance.load(std::memory_order_relaxed) ? "true" : "false");
     if (len <= 0) return false;
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -1377,7 +1519,7 @@ sl::Result HookSlDLSSGGetState(
             state.numFramesToGenerateMax = advertised;
         }
     }
-    RecordDlssgStateResult(result, state, false);
+    RecordDlssgStateResult(result, state, true);
     return result;
 }
 
@@ -2937,16 +3079,31 @@ DWORD WINAPI PatchWorker(void* context)
     gConfigPath = ResolveConfigPath(static_cast<HMODULE>(context), executableDirectory);
     gStatusPath = JoinPath(ParentPath(gConfigPath), L"bridge_status.json");
     DeleteFileW(gStatusPath.c_str());
+    gPerfCsvPath = JoinPath(ParentPath(gConfigPath), L"RTX40MFG_perf.csv");
+    if (gConfigLogPerformance.load(std::memory_order_relaxed))
+    {
+        std::lock_guard lock(gPerfMutex);
+        if (!gPerfCsv)
+        {
+            gPerfCsv = _wfsopen(gPerfCsvPath.c_str(), L"w, ccs=UTF-8", _SH_DENYWR);
+            if (gPerfCsv)
+            {
+                fprintf(gPerfCsv, "FrameIndex,TimeMs,DeltaMs,Multiplier,KernelMode\n");
+                fflush(gPerfCsv);
+            }
+        }
+    }
     const ControlConfig initialControl = ReadInitialControl();
     StoreControl(initialControl);
     midpoint_fix::SetBlackwellTransfusionEnabled(gConfigBlackwellTransfusion.load(std::memory_order_relaxed));
     FILETIME configWriteTime{};
     ReadLastWriteTime(gConfigPath, configWriteTime);
     Log(L"Initial control: mode=%s multiplier=%ux dynamicTarget=%u FPS "
-        L"dynamicExperimental56=%d blackwellTransfusion=%d; config: %s",
+        L"dynamicExperimental56=%d blackwellTransfusion=%d logPerformance=%d; config: %s",
         initialControl.dynamic ? L"dynamic" : L"fixed", initialControl.multiplier,
         initialControl.dynamicTargetFrameRate, initialControl.dynamicExperimental56,
         gConfigBlackwellTransfusion.load(std::memory_order_relaxed),
+        gConfigLogPerformance.load(std::memory_order_relaxed),
         gConfigPath.c_str());
 
     Log(L"Patch worker started for PID %lu", static_cast<unsigned long>(pid));
@@ -3110,6 +3267,15 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         UninstallLoadLibraryHooks();
         UninstallInterposerDetours();
         proxy::Shutdown();
+        {
+            std::lock_guard lock(gPerfMutex);
+            if (gPerfCsv)
+            {
+                fflush(gPerfCsv);
+                fclose(gPerfCsv);
+                gPerfCsv = nullptr;
+            }
+        }
         if (gLog)
         {
             fclose(gLog);
