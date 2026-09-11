@@ -67,10 +67,4 @@ setup_mod_target(RTX40MFG_dinput8 "dinput8" "dinput8.def" ".dll")
 # 5. Standard ASI target (Ultimate ASI Loader / CET / RenoDX)
 setup_mod_target(DLSSGTransfusionAuto "DLSSG-Transfusion" "" ".asi")
 
-# Also copy DLSSG-Transfusion.asi to DLSSG-Transfusion.dll and backwards-compatible aliases in dist
-add_custom_command(TARGET DLSSGTransfusionAuto POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:DLSSGTransfusionAuto>" "${CMAKE_BINARY_DIR}/dist/DLSSG-Transfusion.dll"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:DLSSGTransfusionAuto>" "${CMAKE_BINARY_DIR}/dist/RTX40MFG.asi"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:DLSSGTransfusionAuto>" "${CMAKE_BINARY_DIR}/dist/RTX40MFG.dll"
-    COMMENT "Copying DLSSG-Transfusion.dll and aliases to dist/"
-)
+# Clean dist output

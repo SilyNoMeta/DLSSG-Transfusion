@@ -113,6 +113,7 @@ std::atomic<uint32_t> gFpsSampleWindowMs{0};
 std::atomic<uint64_t> gFpsSampleTick{0};
 std::atomic<bool> gLogReady{false};
 std::atomic<uint32_t> gAdvertisedMaxGenerated{5};
+std::atomic<uint8_t**> gStreamlineDlssgContextPtr{nullptr};
 std::atomic<bool> gStopWorker{false};
 std::atomic<bool> gFlipMeteringPatched{false};
 std::atomic<uint32_t> gFlipMeteringOffset{0};
@@ -426,15 +427,34 @@ bool SetWrapperMaximum(ModuleRecord& record, uint8_t maximum)
     return true;
 }
 
-void ApplyWrapperMaximum(const ControlConfig& control)
+void SynchronizeStreamlineLiveContext()
 {
-    const uint8_t maximum = RequestedMaximumGeneratedFrames(control);
+    auto* ppContext = gStreamlineDlssgContextPtr.load(std::memory_order_relaxed);
+    if (!ppContext) return;
+    __try
+    {
+        uint8_t* ctx = *ppContext;
+        if (ctx)
+        {
+            *reinterpret_cast<uint32_t*>(ctx + 0x460c) = 5; // ensure max generated frames is 5 (6x)
+            *reinterpret_cast<uint8_t*>(ctx + 0x4610) = 1;  // ensure dynamic MFG is supported
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+void ApplyWrapperMaximum(const ControlConfig& /*control*/)
+{
+    const uint8_t maximum = kExperimentalMaximumGeneratedFrames;
     std::lock_guard lock(gModuleMutex);
     for (auto& record : gModuleRecords)
     {
         if (record.wrapperPatched && record.wrapperMaximumImmediate)
             SetWrapperMaximum(record, maximum);
     }
+    SynchronizeStreamlineLiveContext();
 }
 
 UiResourceTagState CaptureUiResourceTag(const sl::ResourceTag& tag, uint64_t tick)
@@ -1561,17 +1581,19 @@ sl::DLSSGOptions BuildAdjustedOptions(
     const UiInputSnapshot* uiInputs = nullptr)
 {
     sl::DLSSGOptions adjusted = CopyKnownOptions(source, preserveNext);
-    if (snapshot.control.dynamic)
+    const bool isDynamic = snapshot.control.dynamic
+        || (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic);
+    if (isDynamic)
     {
         // The injected object is a complete v5 structure even when Cyberpunk supplied
         // an older prefix, so the active wrapper can consume the dynamic target
         // without reading beyond the game's allocation.
         adjusted.structVersion = sl::kStructVersion5;
         adjusted.mode = sl::DLSSGMode::eDynamic;
-        const uint32_t targetFps = snapshot.control.dynamicTargetFrameRate > 0
-            ? snapshot.control.dynamicTargetFrameRate
-            : 120;
-        adjusted.dynamicTargetFrameRate = static_cast<float>(targetFps);
+        float targetFps = (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic && source.dynamicTargetFrameRate > 0.0f)
+            ? source.dynamicTargetFrameRate
+            : static_cast<float>(snapshot.control.dynamicTargetFrameRate > 0 ? snapshot.control.dynamicTargetFrameRate : 120);
+        adjusted.dynamicTargetFrameRate = targetFps;
         adjusted.numFramesToGenerate =
             RequestedMaximumGeneratedFrames(snapshot.control);
     }
@@ -1792,6 +1814,7 @@ sl::Result SubmitAdjustedOptions(
             adjusted.hudLessBufferFormat, adjusted.uiBufferFormat);
     }
 
+    SynchronizeStreamlineLiveContext();
     const sl::Result result = original(viewport, adjusted);
     RecordAppliedControl(snapshot, result, liveReapply,
         uiRecompositionEnabled, forceUiRecomposition);
@@ -1961,6 +1984,10 @@ sl::Result HookSlDLSSGGetState(
             state.numFramesToGenerateMax = advertised;
         else if (gActiveWrapperPatched.load(std::memory_order_relaxed) && state.numFramesToGenerateMax < kExperimentalMaximumGeneratedFrames)
             state.numFramesToGenerateMax = static_cast<uint32_t>(kExperimentalMaximumGeneratedFrames);
+    }
+    if (result == sl::Result::eOk && state.structVersion >= sl::kStructVersion4)
+    {
+        state.bIsDynamicMFGSupported = sl::Boolean::eTrue;
     }
     RecordDlssgStateResult(result, state, true);
     return result;
@@ -3159,6 +3186,354 @@ bool PatchStreamlineUiRecomposition(HMODULE module, const wchar_t* path)
     return patchedAny;
 }
 
+#pragma pack(push, 1)
+struct StreamlineDynamicMfgParams
+{
+    uint32_t numFramesToGenerate;       // 0x00
+    uint32_t numFramesToGenerate2;      // 0x04
+    uint32_t multiplier;                // 0x08
+    uint32_t reserved0C;                // 0x0C
+    uint64_t reserved10;                // 0x10
+    uint32_t reflexParam;               // 0x18
+    uint8_t  flag1C;                    // 0x1C
+    uint8_t  reserved1D[3];             // 0x1D
+    uint64_t reserved20;                // 0x20
+    uint64_t reserved28;                // 0x28
+    float    dynamicTargetFrameRate;    // 0x30
+    uint32_t reserved34;                // 0x34
+    uint64_t frameTimeUs;               // 0x38
+    uint32_t reserved40;                // 0x40
+    uint32_t maxFramesToGenerate;       // 0x44
+    uint64_t reserved48;                // 0x48
+    uint8_t  flag50;                    // 0x50
+};
+#pragma pack(pop)
+
+typedef void (*PFun_StreamlineDynamicMfgCalculator)(void* context, StreamlineDynamicMfgParams* params);
+static PFun_StreamlineDynamicMfgCalculator gOriginalDynamicMfgCalculator = nullptr;
+static std::atomic<bool> gCalcHooked{ false };
+
+void HookedDynamicMfgCalculator(void* context, StreamlineDynamicMfgParams* params)
+{
+    if (!params)
+    {
+        if (gOriginalDynamicMfgCalculator)
+            gOriginalDynamicMfgCalculator(context, params);
+        return;
+    }
+
+    if (gOriginalDynamicMfgCalculator)
+        gOriginalDynamicMfgCalculator(context, params);
+
+    // If Reflex 2 driver SDK is present and functioning (flag50 != 0), let driver pacing handle it
+    if (params->flag50 != 0)
+        return;
+
+    // High-precision smooth pacing engine for software / Reflex 1 fallback
+    static LARGE_INTEGER sLastQpc{};
+    static LARGE_INTEGER sQpcFreq{};
+    LARGE_INTEGER nowQpc{};
+    QueryPerformanceCounter(&nowQpc);
+    if (sQpcFreq.QuadPart == 0)
+        QueryPerformanceFrequency(&sQpcFreq);
+
+    uint64_t qpcDeltaUs = 0;
+    if (sLastQpc.QuadPart != 0 && nowQpc.QuadPart > sLastQpc.QuadPart && sQpcFreq.QuadPart > 0)
+    {
+        qpcDeltaUs = static_cast<uint64_t>(
+            (nowQpc.QuadPart - sLastQpc.QuadPart) * 1000000 / sQpcFreq.QuadPart);
+    }
+    sLastQpc = nowQpc;
+
+    uint64_t sampleUs = params->frameTimeUs;
+    // Fall back to render-thread QPC interval if Reflex didn't provide delta or delta is anomalous
+    if (sampleUs < 1000 || sampleUs > 500000)
+    {
+        sampleUs = qpcDeltaUs;
+    }
+    if (sampleUs < 1000 || sampleUs > 500000)
+    {
+        sampleUs = 16666; // 60 FPS fallback
+    }
+
+    static double sSmoothedFrameTimeUs = 0.0;
+    static uint32_t sCurrentStableMultiplier = 0;
+    static uint32_t sFramesSinceLastSwitch = 0;
+    constexpr uint32_t kMinSwitchCooldownFrames = 40;
+
+    if (sSmoothedFrameTimeUs <= 0.0)
+    {
+        sSmoothedFrameTimeUs = static_cast<double>(sampleUs);
+    }
+    else
+    {
+        // Smooth exponential moving average (alpha = 0.06, ~16 frames half-life)
+        constexpr double kAlpha = 0.06;
+        sSmoothedFrameTimeUs = (1.0 - kAlpha) * sSmoothedFrameTimeUs + kAlpha * static_cast<double>(sampleUs);
+    }
+
+    float targetFps = params->dynamicTargetFrameRate;
+    if (targetFps <= 0.0f)
+    {
+        const auto snapshot = ReadControlSnapshot();
+        if (snapshot.control.dynamicTargetFrameRate > 0)
+            targetFps = static_cast<float>(snapshot.control.dynamicTargetFrameRate);
+        else
+        {
+            DEVMODEW dm{};
+            dm.dmSize = sizeof(dm);
+            if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 30)
+                targetFps = static_cast<float>(dm.dmDisplayFrequency);
+            else
+                targetFps = 120.0f;
+        }
+    }
+
+    const double baseFps = 1000000.0 / sSmoothedFrameTimeUs;
+    const double idealMultiplier = static_cast<double>(targetFps) / baseFps;
+
+    uint32_t maxAllowedFrames = params->maxFramesToGenerate;
+    if (maxAllowedFrames < 1) maxAllowedFrames = 1;
+    const auto snapshot = ReadControlSnapshot();
+    if (!snapshot.control.dynamicExperimental56 && maxAllowedFrames > 3)
+    {
+        maxAllowedFrames = 3;
+    }
+    const uint32_t maxAllowedMultiplier = maxAllowedFrames + 1;
+
+    uint32_t desiredMultiplier = sCurrentStableMultiplier == 0
+        ? static_cast<uint32_t>(std::round(idealMultiplier))
+        : sCurrentStableMultiplier;
+
+    // Hysteresis deadband (+- 0.35) to prevent oscillation around rounding thresholds
+    if (idealMultiplier > static_cast<double>(desiredMultiplier) + 0.35)
+    {
+        desiredMultiplier = static_cast<uint32_t>(std::round(idealMultiplier));
+    }
+    else if (idealMultiplier < static_cast<double>(desiredMultiplier) - 0.35)
+    {
+        desiredMultiplier = static_cast<uint32_t>(std::round(idealMultiplier));
+    }
+
+    desiredMultiplier = std::clamp(desiredMultiplier, 2u, maxAllowedMultiplier);
+
+    ++sFramesSinceLastSwitch;
+    if (sCurrentStableMultiplier == 0)
+    {
+        sCurrentStableMultiplier = desiredMultiplier;
+        sFramesSinceLastSwitch = kMinSwitchCooldownFrames;
+    }
+    else if (desiredMultiplier != sCurrentStableMultiplier)
+    {
+        const bool emergencyScaleUp = idealMultiplier > static_cast<double>(sCurrentStableMultiplier) + 1.25;
+        if (sFramesSinceLastSwitch >= kMinSwitchCooldownFrames || emergencyScaleUp)
+        {
+            Log(L"[DMFG-PACER] Stable transition: %ux -> %ux (baseFps=%.1f, smoothedTime=%.1fms, targetFps=%.0f, emergency=%d)",
+                sCurrentStableMultiplier, desiredMultiplier,
+                baseFps, sSmoothedFrameTimeUs / 1000.0, targetFps, emergencyScaleUp ? 1 : 0);
+            sCurrentStableMultiplier = desiredMultiplier;
+            sFramesSinceLastSwitch = 0;
+        }
+    }
+
+    const uint32_t finalFrames = sCurrentStableMultiplier - 1;
+    params->numFramesToGenerate = finalFrames;
+    params->numFramesToGenerate2 = finalFrames;
+    params->multiplier = sCurrentStableMultiplier;
+    params->flag50 = 0;
+    if (context)
+    {
+        *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(context) + 0x4078) = finalFrames;
+    }
+}
+
+bool PatchStreamlineDynamicMfgSupported(HMODULE module, const wchar_t* path)
+{
+    if (!module) return false;
+    const auto* nt = ImageHeaders(module);
+    if (!nt) return false;
+    auto* base = reinterpret_cast<uint8_t*>(module);
+
+    struct DynamicMfgSite
+    {
+        const wchar_t* name;
+        const uint8_t* pattern;
+        const uint8_t* replacement;
+        size_t size;
+        bool patched = false;
+        bool newlyPatched = false;
+    };
+
+    // Site 1: checkDynamicMFGSupport capability check (RVA 0x3c6e0)
+    // 48 83 EC 58 80 B9 0C 45 00 00 00 -> sub rsp, 0x58; cmp byte ptr [rcx+0x450c], 0
+    // Replaced with: B0 01 C3 90 90 90 90 90 90 90 90 -> mov al, 1; ret; nop...
+    static const uint8_t kCapPattern[] = {
+        0x48, 0x83, 0xEC, 0x58, 0x80, 0xB9, 0x0C, 0x45, 0x00, 0x00, 0x00
+    };
+    static const uint8_t kCapReplacement[] = {
+        0xB0, 0x01, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
+    };
+
+    // Site 2: Runtime Dispatch Gate in dlfg evaluate loop (RVA 0x4725c)
+    // 41 80 BE 10 46 00 00 00 74 0F 48 8D -> cmp [r14+0x4610], 0; je +0x0F (skips 0x464a0 calculator); lea rdx, [rbp+0x6d0]
+    // Replaced with: 41 80 BE 10 46 00 00 00 90 90 48 8D -> nop nop instead of je +0x0F
+    static const uint8_t kDispatchPattern[] = {
+        0x41, 0x80, 0xBE, 0x10, 0x46, 0x00, 0x00, 0x00, 0x74, 0x0F, 0x48, 0x8D
+    };
+    static const uint8_t kDispatchReplacement[] = {
+        0x41, 0x80, 0xBE, 0x10, 0x46, 0x00, 0x00, 0x00, 0x90, 0x90, 0x48, 0x8D
+    };
+
+    // Site 3: Mode Validator Gate in validateOptions (RVA 0x4bc17)
+    // 40 38 B1 10 46 00 00 0F 85 6F 01 00 00 -> cmp [rcx+0x4610], sil; jne +0x16F (success)
+    // Replaced with: 40 38 B1 10 46 00 00 E9 70 01 00 00 90 -> jmp +0x170 (unconditional success); nop
+    static const uint8_t kValidatorPattern[] = {
+        0x40, 0x38, 0xB1, 0x10, 0x46, 0x00, 0x00, 0x0F, 0x85, 0x6F, 0x01, 0x00, 0x00
+    };
+    static const uint8_t kValidatorReplacement[] = {
+        0x40, 0x38, 0xB1, 0x10, 0x46, 0x00, 0x00, 0xE9, 0x70, 0x01, 0x00, 0x00, 0x90
+    };
+
+    // Site 4: State Advertising Gate in slDLSSGGetState (RVA 0x57c5a)
+    // 45 38 BE 10 46 00 00 0F 95 C0 88 47 50 -> cmp [r14+0x4610], r15b; setne al; mov [rdi+0x50], al
+    // Replaced with: 45 38 BE 10 46 00 00 B0 01 90 88 47 50 -> mov al, 1; nop
+    static const uint8_t kStatePattern[] = {
+        0x45, 0x38, 0xBE, 0x10, 0x46, 0x00, 0x00, 0x0F, 0x95, 0xC0, 0x88, 0x47, 0x50
+    };
+    static const uint8_t kStateReplacement[] = {
+        0x45, 0x38, 0xBE, 0x10, 0x46, 0x00, 0x00, 0xB0, 0x01, 0x90, 0x88, 0x47, 0x50
+    };
+
+    // Site 5: Max Frames Validation Gate in slSetData (RVA 0x5839b)
+    // 45 8B 8F 0C 46 00 00 45 3B C1 0F 86 BA 00 00 00 -> mov r9d, [r15+0x460c]; cmp r8d, r9d; jbe +0xBA
+    // Replaced with: 45 8B 8F 0C 46 00 00 45 3B C1 E9 BB 00 00 00 90 -> unconditional jmp +0xBB; nop (never reject 5x/6x with 0x26)
+    static const uint8_t kMaxFramesPattern[] = {
+        0x45, 0x8B, 0x8F, 0x0C, 0x46, 0x00, 0x00,
+        0x45, 0x3B, 0xC1,
+        0x0F, 0x86, 0xBA, 0x00, 0x00, 0x00
+    };
+    static const uint8_t kMaxFramesReplacement[] = {
+        0x45, 0x8B, 0x8F, 0x0C, 0x46, 0x00, 0x00,
+        0x45, 0x3B, 0xC1,
+        0xE9, 0xBB, 0x00, 0x00, 0x00, 0x90
+    };
+
+    DynamicMfgSite sites[] = {
+        { L"Capability Gate (checkDynamicMFGSupport -> true)", kCapPattern, kCapReplacement, sizeof(kCapPattern) },
+        { L"Runtime Dispatch Gate (unblocked dynamic calculation)", kDispatchPattern, kDispatchReplacement, sizeof(kDispatchPattern) },
+        { L"Mode Validator Gate (unblocked eDynamic validation)", kValidatorPattern, kValidatorReplacement, sizeof(kValidatorPattern) },
+        { L"State Advertising Gate (forced state.bIsDynamicMFGSupported = 1)", kStatePattern, kStateReplacement, sizeof(kStatePattern) },
+        { L"Max Frames Validation Gate (unblocked 5x/6x in slSetData)", kMaxFramesPattern, kMaxFramesReplacement, sizeof(kMaxFramesPattern) }
+    };
+
+    bool anyPatched = false;
+    size_t newlyPatchedCount = 0;
+
+    __try
+    {
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+        {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+            uint8_t* start = base + section->VirtualAddress;
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage) continue;
+            const size_t available = nt->OptionalHeader.SizeOfImage - section->VirtualAddress;
+            const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+
+            for (auto& site : sites)
+            {
+                if (site.patched || size < site.size) continue;
+                for (size_t off = 0; off + site.size <= size; ++off)
+                {
+                    if (memcmp(start + off, site.replacement, site.size) == 0)
+                    {
+                        site.patched = true;
+                        anyPatched = true;
+                        break;
+                    }
+                    if (memcmp(start + off, site.pattern, site.size) == 0)
+                    {
+                        DWORD oldProtect = 0;
+                        if (VirtualProtect(start + off, site.size, PAGE_EXECUTE_READWRITE, &oldProtect))
+                        {
+                            memcpy(start + off, site.replacement, site.size);
+                            DWORD ignored = 0;
+                            VirtualProtect(start + off, site.size, oldProtect, &ignored);
+                            FlushInstructionCache(GetCurrentProcess(), start + off, site.size);
+                            site.patched = true;
+                            site.newlyPatched = true;
+                            anyPatched = true;
+                            newlyPatchedCount++;
+                            Log(L"Streamline Dynamic MFG unlock: %s applied in %s",
+                                site.name, path ? path : L"");
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for (size_t off = 0; off + 15 <= size; ++off)
+            {
+                if (start[off] == 0x4C && start[off + 1] == 0x8B && start[off + 2] == 0x3D)
+                {
+                    static const uint8_t kContextTail[] = { 0x44, 0x8B, 0x47, 0x24, 0x41, 0x83, 0xF8, 0x01 };
+                    if (memcmp(start + off + 7, kContextTail, sizeof(kContextTail)) == 0)
+                    {
+                        const int32_t disp = *reinterpret_cast<const int32_t*>(start + off + 3);
+                        uint8_t** ppContext = reinterpret_cast<uint8_t**>(start + off + 7 + disp);
+                        gStreamlineDlssgContextPtr.store(ppContext, std::memory_order_release);
+                        SynchronizeStreamlineLiveContext();
+                    }
+                }
+            }
+
+            for (size_t off = 0; off + 16 <= size; ++off)
+            {
+                static const uint8_t kCalcPattern[] = {
+                    0x48, 0x8B, 0xC4, 0x53, 0x57, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x48, 0x89, 0x70, 0xE8
+                };
+                if (!gCalcHooked.load(std::memory_order_relaxed) &&
+                    memcmp(start + off, kCalcPattern, sizeof(kCalcPattern)) == 0)
+                {
+                    void* target = start + off;
+                    gOriginalDynamicMfgCalculator = reinterpret_cast<PFun_StreamlineDynamicMfgCalculator>(target);
+                    DetourTransactionBegin();
+                    DetourUpdateThread(GetCurrentThread());
+                    LONG status = DetourAttach(reinterpret_cast<void**>(&gOriginalDynamicMfgCalculator),
+                                               reinterpret_cast<void*>(&HookedDynamicMfgCalculator));
+                    if (status == NO_ERROR && DetourTransactionCommit() == NO_ERROR)
+                    {
+                        gCalcHooked.store(true, std::memory_order_release);
+                        Log(L"Streamline Dynamic MFG smooth pacer hook installed at 0x%p in %s",
+                            target, path ? path : L"");
+                    }
+                    else
+                    {
+                        DetourTransactionAbort();
+                        Log(L"Streamline Dynamic MFG smooth pacer hook FAILED (status=%ld) at 0x%p in %s",
+                            status, target, path ? path : L"");
+                    }
+                }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+
+    if (newlyPatchedCount > 0)
+    {
+        size_t activeCount = 0;
+        for (const auto& s : sites)
+            if (s.patched) activeCount++;
+        Log(L"Streamline Dynamic MFG unlock: %zu of %zu site(s) successfully unlocked in %s",
+            activeCount, sizeof(sites) / sizeof(sites[0]), path ? path : L"");
+    }
+
+    return anyPatched;
+}
+
 static bool SafeScanDlssgArchSites(const uint8_t* base, const IMAGE_NT_HEADERS64* nt,
     uint8_t** outSites, size_t maxSites, size_t* outFound, size_t* outAlreadyPatched)
 {
@@ -3892,13 +4267,13 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
                 if (result.patched && result.match)
                 {
                     existing->wrapperMaximumImmediate = result.match + 1;
-                    SetWrapperMaximum(*existing,
-                        RequestedMaximumGeneratedFrames(ReadControlSnapshot().control));
+                    SetWrapperMaximum(*existing, kExperimentalMaximumGeneratedFrames);
                 }
                 const bool ceilingPatched = PatchStreamlineCeilingClamp(module, path.c_str());
                 PatchStreamlineUiRecomposition(module, path.c_str());
-                existing->wrapperCandidate = existing->wrapperCandidate || ceilingPatched;
-                existing->wrapperPatched = existing->wrapperPatched || ceilingPatched;
+                const bool dmfgPatched = PatchStreamlineDynamicMfgSupported(module, path.c_str());
+                existing->wrapperCandidate = existing->wrapperCandidate || ceilingPatched || dmfgPatched;
+                existing->wrapperPatched = existing->wrapperPatched || ceilingPatched || dmfgPatched;
                 RecomputeModuleStateLocked();
             }
             if (existing->ngxPatched && !existing->ngxTemporalPatched)
@@ -3951,13 +4326,13 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
                 if (result.patched && result.match)
                 {
                     record.wrapperMaximumImmediate = result.match + 1;
-                    SetWrapperMaximum(record,
-                        RequestedMaximumGeneratedFrames(ReadControlSnapshot().control));
+                    SetWrapperMaximum(record, kExperimentalMaximumGeneratedFrames);
                 }
                 const bool ceilingPatched = PatchStreamlineCeilingClamp(module, path.c_str());
                 PatchStreamlineUiRecomposition(module, path.c_str());
-                record.wrapperCandidate = record.wrapperCandidate || ceilingPatched;
-                record.wrapperPatched = record.wrapperPatched || ceilingPatched;
+                const bool dmfgPatched = PatchStreamlineDynamicMfgSupported(module, path.c_str());
+                record.wrapperCandidate = record.wrapperCandidate || ceilingPatched || dmfgPatched;
+                record.wrapperPatched = record.wrapperPatched || ceilingPatched || dmfgPatched;
             }
             if (record.ngxExport)
             {

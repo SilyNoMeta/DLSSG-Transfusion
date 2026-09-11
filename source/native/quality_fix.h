@@ -155,8 +155,11 @@ add.f32 %qf5, %qf5, %qf6;
 add.f32 %qf5, %qf5, %qf7;
 setp.lt.f32 %qv2, %qf5, 0f7F800000;
 and.pred %qv1, %qv1, %qv2;
+and.pred %qv3, %qv0, %qv1;
 ld.param.u8 %qrs0, [%rd6+220];
 setp.ne.s16 %qv9, %qrs0, 0;
+
+// E_static = |Unwarped0 - Unwarped1|
 sub.f32 %qf6, %f115, %f119;
 sub.f32 %qf7, %f116, %f120;
 sub.f32 %qf8, %f117, %f121;
@@ -165,25 +168,44 @@ abs.f32 %qf7, %qf7;
 abs.f32 %qf8, %qf8;
 add.f32 %qf6, %qf6, %qf7;
 add.f32 %qf6, %qf6, %qf8;
-setp.gt.f32 %qv4, %qf6, 0f3E3851EC;
-setp.ge.f32 %qv5, %f148, 0f3E0F5C29;
-setp.ge.f32 %qv2, %f148, 0f3DA3D70A;
-and.pred %qv2, %qv2, %qv4;
-or.pred %qv5, %qv5, %qv2;
+
+// E_motion = |Warped0 - Warped1|
+sub.f32 %qf9, %f125, %f131;
+sub.f32 %qf10, %f126, %f132;
+sub.f32 %qf11, %f127, %f133;
+abs.f32 %qf9, %qf9;
+abs.f32 %qf10, %qf10;
+abs.f32 %qf11, %qf11;
+add.f32 %qf9, %qf9, %qf10;
+add.f32 %qf9, %qf9, %qf11;
+
+// E_motion + margin (0.08f = 0f3DA3D70A) < E_static
+add.f32 %qf10, %qf9, 0f3DA3D70A;
+setp.lt.f32 %qv4, %qf10, %qf6;
+
+// Absolute limit: E_motion < 0.15f (0f3E19999A)
+setp.lt.f32 %qv2, %qf9, 0f3E19999A;
+and.pred %qv4, %qv4, %qv2;
+
+// Must have both candidates geometrically valid and finite
+and.pred %qv4, %qv4, %qv3;
+
+// Dynamic motion requirement for primary floor & disocclusion: E_static > 0.25f (0f3E800000)
+// Prevents static transparent UI (where E_static <= 0.25f) from being warped or copied.
+setp.gt.f32 %qv2, %qf6, 0f3E800000;
+
+setp.ge.f32 %qv5, %f148, 0f3E4CCCCD;
+and.pred %qv5, %qv5, %qv2;
+or.pred %qv5, %qv5, %qv4;
 or.pred %qv5, %qv5, %qv9;
 and.pred %qv0, %qv0, %qv5;
-setp.ge.f32 %qv6, %f149, 0f3E0F5C29;
-setp.ge.f32 %qv2, %f149, 0f3DA3D70A;
-and.pred %qv2, %qv2, %qv4;
-or.pred %qv6, %qv6, %qv2;
+
+setp.ge.f32 %qv6, %f149, 0f3E4CCCCD;
+and.pred %qv6, %qv6, %qv2;
+or.pred %qv6, %qv6, %qv4;
 or.pred %qv6, %qv6, %qv9;
 and.pred %qv1, %qv1, %qv6;
-not.pred %qv7, %qv1;
-and.pred %qv7, %qv7, %qv0;
-not.pred %qv8, %qv0;
-and.pred %qv8, %qv8, %qv1;
-and.pred %qv7, %qv7, %qv0;
-and.pred %qv8, %qv8, %qv1;
+
 max.f32 %qf0, %f148, 0f3F59999A;
 min.f32 %qf0, %qf0, 0f3F800000;
 max.f32 %qf1, %f149, 0f3F59999A;
@@ -200,6 +222,29 @@ sub.f32 %qf4, %f133, %f121;
 @%qv1 fma.rn.f32 %f43, %qf1, %qf2, %f119;
 @%qv1 fma.rn.f32 %f42, %qf1, %qf3, %f120;
 @%qv1 fma.rn.f32 %f41, %qf1, %qf4, %f121;
+
+// Confident asymmetric disocclusion:
+// Requires E_static > 0.25f (0f3E800000) so disocclusion copy never fires on static UI.
+setp.ge.f32 %qv7, %f148, 0f3E800000;
+setp.lt.f32 %qv3, %f149, 0f3DA3D70A;
+and.pred %qv7, %qv7, %qv3;
+and.pred %qv7, %qv7, %qv0;
+and.pred %qv7, %qv7, %qv2;
+
+setp.ge.f32 %qv8, %f149, 0f3E800000;
+setp.lt.f32 %qv3, %f148, 0f3DA3D70A;
+and.pred %qv8, %qv8, %qv3;
+and.pred %qv8, %qv8, %qv1;
+and.pred %qv8, %qv8, %qv2;
+
+@%qv7 mov.f32 %f43, %f39;
+@%qv7 mov.f32 %f42, %f38;
+@%qv7 mov.f32 %f41, %f37;
+@%qv7 mov.f32 %f40, %f36;
+@%qv8 mov.f32 %f39, %f43;
+@%qv8 mov.f32 %f38, %f42;
+@%qv8 mov.f32 %f37, %f41;
+@%qv8 mov.f32 %f36, %f40;
 )ptx";
 
 inline bool Patch(std::string& ptx, std::string& why)
