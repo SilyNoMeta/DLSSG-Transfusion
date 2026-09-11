@@ -129,9 +129,9 @@ cmake -S .\source\native -B .\build -G "Visual Studio 17 2022" -A x64 `
 cmake --build .\build --config Release --parallel
 ```
 
-The native build writes `build\Release\RTX40MFG.asi`. The CET UI and its
+The native build writes `build\Release\DLSSG-Transfusion.asi` and proxy DLLs to `build\dist\`. The CET UI and its
 FPS/status client are tracked at
-`bin\x64\plugins\cyber_engine_tweaks\mods\RTX40MFG\init.lua`. Breakpoint and
+`bin\x64\plugins\cyber_engine_tweaks\mods\DLSSG-Transfusion\init.lua`. Breakpoint and
 deep-kernel research diagnostics are disabled in the normal build.
 
 Logs are written to the temporary directory and include the process ID.

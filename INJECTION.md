@@ -49,13 +49,13 @@ Hotkeys automatically save the new configuration to `DLSSG-Transfusion.json` and
 
 ---
 
-## 3. Configuration (`config.json`)
+## 3. Configuration (`DLSSG-Transfusion.json`)
 
-The mod creates and looks for `config.json` in:
-1. Next to the proxy DLL (`version.dll` / `dxgi.dll` / `winmm.dll`) in the game directory.
-2. If running Cyberpunk 2077 with CET, in `plugins\cyber_engine_tweaks\mods\RTX40MFG\config.json`.
+The mod creates and looks for `DLSSG-Transfusion.json` in:
+1. Next to the proxy DLL (`version.dll` / `dxgi.dll` / `winmm.dll` / `DLSSG-Transfusion.asi`) in the game directory.
+2. If running Cyberpunk 2077 with CET, in `plugins\cyber_engine_tweaks\mods\DLSSG-Transfusion\DLSSG-Transfusion.json`.
 
-Example `config.json`:
+Example `DLSSG-Transfusion.json`:
 ```json
 {
   "mode": "fixed",
@@ -74,11 +74,11 @@ Example `config.json`:
 
 ## 4. Diagnostic Logging
 
-The mod automatically creates `RTX40MFG.log` in the game executable directory.
+The mod automatically creates `DLSSG-Transfusion.log` in the game executable directory.
 
 Log entries include microsecond timestamps:
 ```text
-[2026-09-03 23:23:05.581] RTX40MFG-Unlock (General-Use Proxy & Multi-Game Edition)
+[2026-09-03 23:23:05.581] DLSSG-Transfusion (Universal Blackwell Transfusion & Multi-Game Edition)
 [2026-09-03 23:23:05.581] Loaded as: version.dll
 [2026-09-03 23:23:05.581] Proxied system DLL: C:\WINDOWS\system32\version.dll
 [2026-09-03 23:23:05.581] Module Path: D:\Games\GameDir\version.dll
@@ -103,5 +103,5 @@ Log entries include microsecond timestamps:
 - Use `Ctrl+Alt+3..6` to switch multipliers.
 
 ### REDengine (Cyberpunk 2077)
-- Compatible both as standalone proxy (`bin/x64/version.dll`) or with CET (`bin/x64/plugins/cyber_engine_tweaks/mods/RTX40MFG/init.lua` + `RTX40MFG.asi`).
-- If using `version.dll`, CET UI will automatically sync with `config.json` and hotkeys.
+- Compatible both as standalone proxy (`bin/x64/version.dll`) or with CET (`bin/x64/plugins/cyber_engine_tweaks/mods/DLSSG-Transfusion/init.lua` + `DLSSG-Transfusion.asi`).
+- If using `version.dll`, CET UI will automatically sync with `DLSSG-Transfusion.json` and hotkeys.

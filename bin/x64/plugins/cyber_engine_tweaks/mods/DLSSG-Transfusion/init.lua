@@ -1,5 +1,5 @@
-local MOD_NAME = "RTX 40 MFG Unlock"
-local CONFIG_PATH = "config.json"
+local MOD_NAME = "DLSSG-Transfusion"
+local CONFIG_PATH = "DLSSG-Transfusion.json"
 local STATUS_PATH = "bridge_status.json"
 local VALID_MULTIPLIERS = {
     [2] = true, [3] = true, [4] = true, [5] = true, [6] = true
@@ -191,7 +191,7 @@ local function saveConfig()
     elseif nativeStatusDetected then
         statusMessage = describeRequest() .. " saved. Waiting for active DLSS-G modules."
     else
-        statusMessage = describeRequest() .. " saved. Auto-loader not detected; verify bin/x64/plugins/RTX40MFG.asi."
+        statusMessage = describeRequest() .. " saved. Auto-loader not detected; verify bin/x64/plugins/DLSSG-Transfusion.asi."
     end
     print(MOD_NAME .. ": " .. statusMessage)
     return true
@@ -283,7 +283,7 @@ local function refreshBridgeStatus()
         end
         print(MOD_NAME .. ": " .. statusMessage)
     elseif nativeStatusVersion < 7 then
-        statusMessage = "Update RTX40MFG.asi; bridge protocol is outdated."
+        statusMessage = "Update DLSSG-Transfusion.asi; bridge protocol is outdated."
     elseif not liveBridgeDetected then
         statusMessage = "Waiting for the active DLSS-G wrapper and NGX module."
     end
@@ -400,12 +400,12 @@ registerForEvent("onDraw", function()
         ImGui.Text("UI: " .. uiStatus)
     elseif nativeStatusDetected then
         if nativeStatusVersion and nativeStatusVersion < 7 then
-            ImGui.Text("Bridge: Update RTX40MFG.asi")
+            ImGui.Text("Bridge: Update DLSSG-Transfusion.asi")
         else
             ImGui.Text("Bridge: Waiting for active DLSS-G modules")
         end
     else
-        ImGui.Text("Bridge: Offline - check RTX40MFG.asi")
+        ImGui.Text("Bridge: Offline - check DLSSG-Transfusion.asi")
     end
     ImGui.Separator()
 

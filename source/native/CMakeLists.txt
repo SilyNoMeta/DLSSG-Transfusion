@@ -53,16 +53,16 @@ function(setup_mod_target TARGET_NAME OUTPUT_BASENAME DEF_FILE EXTENSION)
 endfunction()
 
 # 1. version.dll proxy target
-setup_mod_target(RTX40MFG_version "version" "version.def" ".dll")
+setup_mod_target(Transfusion_version "version" "version.def" ".dll")
 
 # 2. winmm.dll proxy target
-setup_mod_target(RTX40MFG_winmm "winmm" "winmm.def" ".dll")
+setup_mod_target(Transfusion_winmm "winmm" "winmm.def" ".dll")
 
 # 3. dxgi.dll proxy target
-setup_mod_target(RTX40MFG_dxgi "dxgi" "dxgi.def" ".dll")
+setup_mod_target(Transfusion_dxgi "dxgi" "dxgi.def" ".dll")
 
 # 4. dinput8.dll proxy target
-setup_mod_target(RTX40MFG_dinput8 "dinput8" "dinput8.def" ".dll")
+setup_mod_target(Transfusion_dinput8 "dinput8" "dinput8.def" ".dll")
 
 # 5. Standard ASI target (Ultimate ASI Loader / CET / RenoDX)
 setup_mod_target(DLSSGTransfusionAuto "DLSSG-Transfusion" "" ".asi")

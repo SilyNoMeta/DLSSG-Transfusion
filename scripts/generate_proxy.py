@@ -13,7 +13,7 @@ version_exps = get_exports("version.dll")
 dxgi_exps = get_exports("dxgi.dll")
 winmm_exps = get_exports("winmm.dll")
 
-base_dir = "d:/Coding/DLSSGUnlock/RTX40MFG-Unlock/source/native"
+base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../source/native"))
 
 # 1. Generate version.def
 with open(os.path.join(base_dir, "version.def"), "w") as f:

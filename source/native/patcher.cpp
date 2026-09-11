@@ -1259,7 +1259,7 @@ std::wstring ResolveConfigPath(HMODULE instance, const std::wstring& executableD
 
     // 3. Cyberpunk CET mod path if it exists
     const std::wstring cetDir = JoinPath(executableDirectory,
-        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG");
+        L"plugins\\cyber_engine_tweaks\\mods\\DLSSG-Transfusion");
     if (IsDirectory(cetDir))
     {
         const std::wstring cetConfig = JoinPath(cetDir, kConfigFilename);
@@ -4679,7 +4679,7 @@ DWORD WINAPI PatchWorker(void* context)
     gConfigPath = ResolveConfigPath(static_cast<HMODULE>(context), executableDirectory);
 
     const std::wstring cetDir = JoinPath(executableDirectory,
-        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG");
+        L"plugins\\cyber_engine_tweaks\\mods\\DLSSG-Transfusion");
     if (IsDirectory(cetDir))
     {
         gStatusPath = JoinPath(cetDir, L"bridge_status.json");

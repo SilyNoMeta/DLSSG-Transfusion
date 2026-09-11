@@ -10,16 +10,15 @@
 namespace
 {
 constexpr wchar_t kConfigPath[] =
-    L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG\\config.json";
+    L"plugins\\cyber_engine_tweaks\\mods\\DLSSG-Transfusion\\DLSSG-Transfusion.json";
 constexpr wchar_t kStatusPath[] =
-    L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG\\bridge_status.json";
+    L"plugins\\cyber_engine_tweaks\\mods\\DLSSG-Transfusion\\bridge_status.json";
 
 bool WriteControl(const char* mode, uint32_t multiplier, uint32_t target,
     bool dynamicExperimental56 = false)
 {
     const wchar_t* paths[] = {
-        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG\\DLSSG-Transfusion.json",
-        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG\\config.json"
+        L"plugins\\cyber_engine_tweaks\\mods\\DLSSG-Transfusion\\DLSSG-Transfusion.json"
     };
     for (const auto* path : paths)
     {
