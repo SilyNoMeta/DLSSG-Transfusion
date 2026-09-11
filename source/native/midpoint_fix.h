@@ -10,7 +10,11 @@ using LogCallback = void (*)(const wchar_t* message);
 
 void SetLogCallback(LogCallback callback) noexcept;
 void SetBlackwellTransfusionEnabled(bool enabled) noexcept;
+// Provider PTX is patched at load time; changing this requires a game restart.
+void SetQualityFixEnabled(bool enabled) noexcept;
 bool IsBlackwellTransfusionActive() noexcept;
+void SetMvDilationDisabled(bool disabled) noexcept;
+bool IsMvDilationDisabled() noexcept;
 size_t GetTransfusedFatbinCount() noexcept;
 size_t GetTransfusedDescriptorCount() noexcept;
 bool ObserveD3D12Device(void* device) noexcept;

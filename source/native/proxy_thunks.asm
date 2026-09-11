@@ -1315,4 +1315,10 @@ Proxy_Ordinal2 proc
     jmp qword ptr [g_Real_Ordinal2]
 Proxy_Ordinal2 endp
 
+extern g_Real_DirectInput8Create : qword
+public Proxy_DirectInput8Create
+Proxy_DirectInput8Create proc
+    jmp qword ptr [g_Real_DirectInput8Create]
+Proxy_DirectInput8Create endp
+
 end

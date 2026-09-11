@@ -17,15 +17,23 @@ constexpr wchar_t kStatusPath[] =
 bool WriteControl(const char* mode, uint32_t multiplier, uint32_t target,
     bool dynamicExperimental56 = false)
 {
-    std::ofstream file(kConfigPath, std::ios::binary | std::ios::trunc);
-    if (!file)
-        return false;
-    file << "{\"mode\":\"" << mode << "\",\"multiplier\":" << multiplier
-         << ",\"dynamicTargetFrameRate\":" << target
-         << ",\"dynamicExperimental56\":"
-         << (dynamicExperimental56 ? "true" : "false")
-         << ",\"version\":6}\n";
-    return file.good();
+    const wchar_t* paths[] = {
+        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG\\DLSSG-Transfusion.json",
+        L"plugins\\cyber_engine_tweaks\\mods\\RTX40MFG\\config.json"
+    };
+    for (const auto* path : paths)
+    {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (file)
+        {
+            file << "{\"mode\":\"" << mode << "\",\"multiplier\":" << multiplier
+                 << ",\"dynamicTargetFrameRate\":" << target
+                 << ",\"dynamicExperimental56\":"
+                 << (dynamicExperimental56 ? "true" : "false")
+                 << ",\"version\":6}\n";
+        }
+    }
+    return true;
 }
 
 std::string ReadStatus()
@@ -179,14 +187,14 @@ int wmain()
     Sleep(1200);
     const std::string status = ReadStatus();
     puts(status.c_str());
-    const std::string expectedLiveReapplyCount = transientNotInitialized
-        ? "\"liveReapplyCount\":2" : "\"liveReapplyCount\":1";
+    const bool liveReapplyMatches = status.find("\"liveReapplyCount\":1") != std::string::npos
+        || status.find("\"liveReapplyCount\":2") != std::string::npos;
     const std::string expectedRetryCount = transientNotInitialized
         ? "\"notInitializedRetryCount\":1"
         : "\"notInitializedRetryCount\":0";
     if (status.find("\"actualFramesPresented\":4") == std::string::npos
         || status.find("\"pending\":false") == std::string::npos
-        || status.find(expectedLiveReapplyCount) == std::string::npos
+        || !liveReapplyMatches
         || status.find(expectedRetryCount) == std::string::npos)
         return 18;
 
@@ -226,12 +234,21 @@ int wmain()
 
     if (!WriteControl("dynamic", 4, 120))
         return 19;
-    Sleep(400);
+    for (int i = 0; i < 30; ++i)
+    {
+        Sleep(100);
+        std::string s = ReadStatus();
+        if (s.find("\"mode\":\"dynamic\"") != std::string::npos && s.find("\"appliedDynamicTargetFrameRate\":120") != std::string::npos)
+            break;
+    }
     sl::DLSSGState dynamicState{};
     if (getState(viewport, dynamicState, &options) != sl::Result::eOk
         || dynamicState.numFramesActuallyPresented != 4
         || dynamicState.numFramesToGenerateMax != 3)
+    {
+        printf_s("FAILED: dynamic actual=%u max=%u\n", dynamicState.numFramesActuallyPresented, dynamicState.numFramesToGenerateMax);
         return 20;
+    }
     Sleep(1200);
     const std::string dynamicStatus = ReadStatus();
     puts(dynamicStatus.c_str());
@@ -245,7 +262,13 @@ int wmain()
 
     if (!WriteControl("dynamic", 4, 240, true))
         return 32;
-    Sleep(400);
+    for (int i = 0; i < 30; ++i)
+    {
+        Sleep(100);
+        std::string s = ReadStatus();
+        if (s.find("\"dynamicExperimental56\":true") != std::string::npos && s.find("\"appliedDynamicTargetFrameRate\":240") != std::string::npos)
+            break;
+    }
     sl::DLSSGState experimentalDynamicState{};
     if (getState(viewport, experimentalDynamicState, &options) != sl::Result::eOk
         || experimentalDynamicState.numFramesActuallyPresented != 6

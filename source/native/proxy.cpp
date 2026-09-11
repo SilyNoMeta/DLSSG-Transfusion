@@ -223,6 +223,7 @@ void* g_Real_waveOutSetVolume = reinterpret_cast<void*>(&DummyFunc);
 void* g_Real_waveOutUnprepareHeader = reinterpret_cast<void*>(&DummyFunc);
 void* g_Real_waveOutWrite = reinterpret_cast<void*>(&DummyFunc);
 void* g_Real_Ordinal2 = reinterpret_cast<void*>(&DummyFunc);
+void* g_Real_DirectInput8Create = reinterpret_cast<void*>(&DummyFunc);
 
 } // extern "C"
 
@@ -254,6 +255,7 @@ const wchar_t* GetCurrentTypeName()
     case ProxyType::Version: return L"version.dll";
     case ProxyType::Winmm: return L"winmm.dll";
     case ProxyType::Dxgi: return L"dxgi.dll";
+    case ProxyType::Dinput8: return L"dinput8.dll";
     default: return L"standalone / ASI";
     }
 }
@@ -524,6 +526,19 @@ ProxyType Initialize(HINSTANCE instance)
             if (auto* p = GetProcAddress(g_SystemLibrary, "waveOutUnprepareHeader")) g_Real_waveOutUnprepareHeader = reinterpret_cast<void*>(p);
             if (auto* p = GetProcAddress(g_SystemLibrary, "waveOutWrite")) g_Real_waveOutWrite = reinterpret_cast<void*>(p);
             if (auto* p = GetProcAddress(g_SystemLibrary, MAKEINTRESOURCEA(2))) g_Real_Ordinal2 = reinterpret_cast<void*>(p);
+        }
+        return g_CurrentType;
+    }
+
+    if (lowerName == L"dinput8.dll")
+    {
+        g_CurrentType = ProxyType::Dinput8;
+        g_OriginalLibraryPath = std::wstring(sysDir) + L"\\dinput8.dll";
+        g_SystemLibrary = LoadLibraryExW(g_OriginalLibraryPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (g_SystemLibrary)
+        {
+            if (auto* p = GetProcAddress(g_SystemLibrary, "DirectInput8Create"))
+                g_Real_DirectInput8Create = reinterpret_cast<void*>(p);
         }
         return g_CurrentType;
     }

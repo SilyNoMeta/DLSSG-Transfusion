@@ -1,4 +1,7 @@
 #include "midpoint_fix.h"
+#include "quality_fix.h"
+#include "scatter_experiment.h"
+#include "input_motion_experiment.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +15,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace midpoint_fix
@@ -177,8 +181,8 @@ inline bool FindAdaPtxEntry(const uint8_t* fat, size_t fat_size, size_t& entry_o
         const uint32_t kind = ReadU16(fat + p);
         const uint32_t hdr = ReadU32(fat + p + 4);
         const uint64_t payload = ReadU64(fat + p + 8);
-        if (hdr < 64 || payload == 0) return false;
-        if (p + hdr + payload > fat_size) return false;
+        const size_t entry_remain = fat_size - p;
+        if (hdr < 64 || payload == 0 || hdr > entry_remain || payload > entry_remain - hdr) return false;
         if (kind == kPtxKind && ReadU32(fat + p + 28) == kAdaArch)
         {
             entry_offset = p;
@@ -202,8 +206,8 @@ inline bool FindBlackwellPtxEntry(const uint8_t* fat, size_t fat_size, size_t& e
         const uint32_t kind = ReadU16(fat + p);
         const uint32_t hdr = ReadU32(fat + p + 4);
         const uint64_t payload = ReadU64(fat + p + 8);
-        if (hdr < 64 || payload == 0) return false;
-        if (p + hdr + payload > fat_size) return false;
+        const size_t entry_remain = fat_size - p;
+        if (hdr < 64 || payload == 0 || hdr > entry_remain || payload > entry_remain - hdr) return false;
         if (kind == kPtxKind && ReadU32(fat + p + 28) == kBlackwellArch)
         {
             entry_offset = p;
@@ -361,7 +365,12 @@ inline bool BuildTemporalFatbin(const uint8_t* fat, size_t fat_size,
     return true;
 }
 
+void Log(const wchar_t* format, ...);
+static std::atomic<bool> gMvDilationDisabled{false};
+static std::atomic<bool> gQualityFixEnabled{true};
+
 inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
+                                           const char* kernel_name,
                                            std::vector<uint8_t>& out, std::string& why)
 {
     size_t ada_entry = 0;
@@ -394,44 +403,53 @@ inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
         return false;
     }
 
-    constexpr char kTargetBw[] = ".target sm_120";
-    constexpr char kTargetAda[] = ".target sm_89\n";
-    constexpr size_t kTargetBwLen = sizeof(kTargetBw) - 1;
-
-    const char* ptx_str = reinterpret_cast<const char*>(bw_ptx.data());
-    const size_t ptx_size = bw_ptx.size();
-    size_t target_pos = SIZE_MAX;
-    for (size_t i = 0; i + kTargetBwLen <= ptx_size; ++i)
+    std::string ptx_text(reinterpret_cast<const char*>(bw_ptx.data()), bw_ptx.size());
+    if (kernel_name && std::strcmp(kernel_name, "Kernel_BlendCandidatesFused") == 0
+        && gQualityFixEnabled.load(std::memory_order_relaxed))
     {
-        if (std::memcmp(ptx_str + i, kTargetBw, kTargetBwLen) == 0)
-        {
-            target_pos = i;
-            break;
-        }
+        std::string quality_status;
+        const bool patched = quality_fix::Patch(ptx_text, quality_status);
+        Log(L"Quality PTX preparation: %hs (patched=%d)", quality_status.c_str(), patched);
     }
-
-    if (target_pos == SIZE_MAX)
+    if (kernel_name && std::strcmp(kernel_name, "Kernel_EstimateIntermMvecsScatter") == 0)
+    {
+        std::string experimentStatus;
+        const bool patched = scatter_experiment::Patch(ptx_text, experimentStatus);
+        Log(L"Scatter experiment: %hs; %hs (prepared=%d)", scatter_experiment::kName, experimentStatus.c_str(), patched);
+        if (!patched) { why = experimentStatus; return false; }
+    }
+    if (kernel_name && std::strcmp(kernel_name, "Kernel_InputMvecProcessing") == 0
+        && scatter_experiment::kMode == 3)
+    {
+        std::string status;
+        const bool patched = input_motion_experiment::Patch(ptx_text, status);
+        Log(L"Input motion experiment: %hs; %hs (prepared=%d)", scatter_experiment::kName, status.c_str(), patched);
+        if (!patched) { why = status; return false; }
+    }
+    const size_t target_pos = ptx_text.find(".target sm_120");
+    if (target_pos == std::string::npos)
     {
         why = "could not find .target sm_120 in Blackwell PTX";
         return false;
     }
 
-    std::vector<uint8_t> patched;
-    patched.reserve(ptx_size + 16);
-    patched.insert(patched.end(), bw_ptx.begin(), bw_ptx.begin() + target_pos);
-    patched.insert(patched.end(), kTargetAda, kTargetAda + std::strlen(kTargetAda));
-    size_t after = target_pos + kTargetBwLen;
-    while (after < ptx_size && (ptx_str[after] == '\r' || ptx_str[after] == '\n' || ptx_str[after] == ' '))
+    size_t after = target_pos + sizeof(".target sm_120") - 1;
+    while (after < ptx_text.size() && (ptx_text[after] == '\r' || ptx_text[after] == '\n' || ptx_text[after] == ' '))
         ++after;
-    patched.insert(patched.end(), bw_ptx.begin() + after, bw_ptx.end());
+    ptx_text.replace(target_pos, after - target_pos, ".target sm_89\n");
+
+    // Preserve the provider's scatter rejection and spatial bounds checks.
+    // The former regex bypass removed depth/motion consistency branches, not
+    // texture address clamping, and did not establish which input was optical flow.
+    // The bounded experiments preserve Blackwell temporal arithmetic.
 
     const uint32_t ada_hdr = ReadU32(fat + ada_entry + 4);
-    const size_t padded = (patched.size() + 7) & ~size_t{7};
+    const size_t padded = (ptx_text.size() + 7) & ~size_t{7};
     const size_t final_size = ada_entry + ada_hdr + padded;
 
     out.assign(fat, fat + ada_entry + ada_hdr);
     out.resize(final_size, 0);
-    std::memcpy(out.data() + ada_entry + ada_hdr, patched.data(), patched.size());
+    std::memcpy(out.data() + ada_entry + ada_hdr, ptx_text.data(), ptx_text.size());
 
     const uint64_t payload64 = padded;
     const uint32_t zero32 = 0;
@@ -443,6 +461,136 @@ inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
     const uint64_t outer = final_size - kOuterHeader;
     std::memcpy(out.data() + 8, &outer, sizeof(outer));
     return true;
+}
+
+inline std::string GetFatbinKernelName(const uint8_t* fat, size_t fat_size)
+{
+    size_t bw_entry = 0;
+    if (!FindBlackwellPtxEntry(fat, fat_size, bw_entry)) return {};
+    const uint32_t bw_hdr = ReadU32(fat + bw_entry + 4);
+    const uint32_t bw_comp = ReadU32(fat + bw_entry + 16);
+    const uint64_t bw_raw = ReadU64(fat + bw_entry + 56);
+    if (bw_comp == 0 || bw_raw == 0 || bw_raw > (8u << 20)) return {};
+    std::vector<uint8_t> bw_ptx(static_cast<size_t>(bw_raw));
+    if (!Lz4BlockDecompress(fat + bw_entry + bw_hdr, bw_comp, bw_ptx.data(), bw_ptx.size())) return {};
+
+    std::string_view ptx_sv(reinterpret_cast<const char*>(bw_ptx.data()), bw_ptx.size());
+    size_t entry_pos = ptx_sv.find(".entry ");
+    if (entry_pos == std::string_view::npos) return {};
+    entry_pos += sizeof(".entry ") - 1;
+    while (entry_pos < ptx_sv.size() && (ptx_sv[entry_pos] == ' ' || ptx_sv[entry_pos] == '\t')) ++entry_pos;
+    size_t name_end = entry_pos;
+    while (name_end < ptx_sv.size() && ptx_sv[name_end] != '(' && ptx_sv[name_end] != '\r' && ptx_sv[name_end] != '\n' && ptx_sv[name_end] != ' ') ++name_end;
+    return std::string(ptx_sv.substr(entry_pos, name_end - entry_pos));
+}
+
+
+// Retargets all Blackwell kernel containers in the module to sm_89 in-place,
+// parking any obsolete Ada images at arch 122 so the driver selects the Blackwell build.
+// Returns the number of retargeted kernel containers.
+static unsigned int RetargetAllBlackwellContainers(uint8_t* base, size_t image_size,
+                                                   uint16_t num_sections,
+                                                   const IMAGE_SECTION_HEADER* section)
+{
+    unsigned int rewritten = 0;
+    constexpr uint32_t kArchParked = 122;
+    constexpr char from[] = ".target sm_120";
+    constexpr char to[]   = ".target sm_89 ";
+    static_assert(sizeof(from) == sizeof(to), "directive rewrite must be identical length");
+
+    for (WORD i = 0; i < num_sections; ++i, ++section)
+    {
+        if ((section->Characteristics & IMAGE_SCN_MEM_READ) == 0) continue;
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) continue;
+        if (section->VirtualAddress >= image_size) continue;
+        const size_t available = image_size - section->VirtualAddress;
+        const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
+        if (size < kOuterHeader) continue;
+        uint8_t* start = base + section->VirtualAddress;
+
+        for (uint8_t* c = start; c + kOuterHeader <= start + size;)
+        {
+            if (ReadU32(c) != kFatbinMagic)
+            {
+                ++c;
+                continue;
+            }
+            const uint16_t headerSize = ReadU16(c + 6);
+            const uint64_t fatSize = ReadU64(c + 8);
+            const size_t remain = static_cast<size_t>((start + size) - c);
+            if (headerSize != 0x10 || fatSize == 0 || remain < 16 || fatSize > remain - 16)
+            {
+                c += 4;
+                continue;
+            }
+
+            const size_t totalContainerBytes = static_cast<size_t>(fatSize) + 16;
+            uint8_t* blackwell_image = nullptr;
+            size_t blackwell_hdr = 0;
+            size_t blackwell_payload = 0;
+            std::vector<uint8_t*> ada_images;
+
+            for (uint8_t* img = c + 16; img + 32 <= c + totalContainerBytes;)
+            {
+                const uint16_t kind = ReadU16(img);
+                const uint32_t imgHeader = ReadU32(img + 4);
+                const uint64_t payload = ReadU64(img + 8);
+                const uint32_t arch = ReadU32(img + 28);
+                const size_t imgRemain = static_cast<size_t>((c + totalContainerBytes) - img);
+                if (imgHeader < 32 || payload == 0 || imgHeader > imgRemain || payload > imgRemain - imgHeader)
+                    break;
+
+                if (kind == kPtxKind && arch == kBlackwellArch)
+                {
+                    blackwell_image = img;
+                    blackwell_hdr = imgHeader;
+                    blackwell_payload = payload;
+                }
+                else if (arch == kAdaArch)
+                {
+                    ada_images.push_back(img);
+                }
+
+                img += imgHeader + payload;
+            }
+
+            if (blackwell_image != nullptr && !ada_images.empty())
+            {
+                uint8_t* body = blackwell_image + blackwell_hdr;
+                uint8_t* bodyEnd = body + blackwell_payload;
+                auto at = std::search(body, bodyEnd, reinterpret_cast<const uint8_t*>(from),
+                                      reinterpret_cast<const uint8_t*>(from) + sizeof(from) - 1);
+                if (at != bodyEnd)
+                {
+                    DWORD oldProtect = 0;
+                    if (VirtualProtect(c, totalContainerBytes, PAGE_READWRITE, &oldProtect))
+                    {
+                        // 1. Rewrite .target sm_120 -> .target sm_89 
+                        std::memcpy(at, to, sizeof(to) - 1);
+
+                        // 2. Relabel Blackwell image header arch: 120 -> 89
+                        const uint32_t newArch = kAdaArch;
+                        std::memcpy(blackwell_image + 28, &newArch, sizeof(newArch));
+
+                        // 3. Park existing Ada images: 89 -> 122
+                        const uint32_t parkedArch = kArchParked;
+                        for (uint8_t* img : ada_images)
+                        {
+                            std::memcpy(img + 28, &parkedArch, sizeof(parkedArch));
+                        }
+                        DWORD ignored = 0;
+                        VirtualProtect(c, totalContainerBytes, oldProtect, &ignored);
+                        FlushInstructionCache(GetCurrentProcess(), c, totalContainerBytes);
+                        ++rewritten;
+                        c += totalContainerBytes;
+                        continue;
+                    }
+                }
+            }
+            c += 4;
+        }
+    }
+    return rewritten;
 }
 
 inline const TemporalProfile* FindTemporalProfile(const uint8_t* fat, size_t fat_size)
@@ -506,7 +654,7 @@ struct ModuleMidpointRecord
     std::vector<void*> allocations;
 };
 
-std::mutex gMidpointMutex;
+std::recursive_mutex gMidpointMutex;
 std::vector<ModuleMidpointRecord> gPatchedModules;
 std::atomic<bool> gReady{false};
 std::atomic<uint32_t> gFailureCode{0};
@@ -540,9 +688,24 @@ void SetBlackwellTransfusionEnabled(bool enabled) noexcept
     gBlackwellTransfusionEnabled.store(enabled, std::memory_order_relaxed);
 }
 
+void SetQualityFixEnabled(bool enabled) noexcept
+{
+    gQualityFixEnabled.store(enabled, std::memory_order_relaxed);
+}
+
 bool IsBlackwellTransfusionActive() noexcept
 {
     return gBlackwellTransfusionActive.load(std::memory_order_acquire);
+}
+
+void SetMvDilationDisabled(bool disabled) noexcept
+{
+    gMvDilationDisabled.store(disabled, std::memory_order_relaxed);
+}
+
+bool IsMvDilationDisabled() noexcept
+{
+    return gMvDilationDisabled.load(std::memory_order_acquire);
 }
 
 size_t GetTransfusedFatbinCount() noexcept
@@ -586,7 +749,13 @@ bool ObserveVulkanPhysicalDevice(void* physicalDevice) noexcept
     };
 
     using GetPhysicalDeviceProperties2 = void (WINAPI*)(void*, VulkanPhysicalDeviceProperties2*);
-    HMODULE vulkan = GetModuleHandleW(L"vulkan-1.dll");
+    HMODULE vulkan = LoadLibraryExW(L"vulkan-1.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    bool shouldFree = true;
+    if (!vulkan)
+    {
+        vulkan = GetModuleHandleW(L"vulkan-1.dll");
+        shouldFree = false;
+    }
     if (!vulkan)
         return false;
     auto* getProperties = reinterpret_cast<GetPhysicalDeviceProperties2>(
@@ -614,6 +783,8 @@ bool ObserveVulkanPhysicalDevice(void* physicalDevice) noexcept
         {
         }
     }
+    if (shouldFree && vulkan)
+        FreeLibrary(vulkan);
     return true;
 }
 
@@ -655,6 +826,33 @@ static bool SafeGetDosAndNtHeaders(HMODULE module, size_t& outImageSize, uint16_
     }
 }
 
+static bool SafeValidateFatbinCandidate(const uint8_t* candidate, size_t max_bytes, size_t& out_total) noexcept
+{
+    __try
+    {
+        if (ReadU32(candidate) != kFatbinMagic)
+            return false;
+
+        if (ReadU16(candidate + 6) != kOuterHeader)
+            return false;
+
+        const uint64_t declared = ReadU64(candidate + 8);
+        if (declared > (16u << 20) || declared < (1024 - kOuterHeader))
+            return false;
+
+        const size_t total = static_cast<size_t>(declared) + kOuterHeader;
+        if (total > max_bytes)
+            return false;
+
+        out_total = total;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 {
     if (!module) return false;
@@ -672,6 +870,8 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
     if (!SafeGetDosAndNtHeaders(module, image_size, num_sections, section))
         return false;
 
+    const IMAGE_SECTION_HEADER* first_section = section;
+
     auto* base = reinterpret_cast<uint8_t*>(module);
     const auto start = reinterpret_cast<uintptr_t>(base);
 
@@ -680,68 +880,100 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
     {
         if ((section->Characteristics & IMAGE_SCN_MEM_READ) == 0) continue;
         if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) continue;
+        if (section->VirtualAddress >= image_size) continue;
         uint8_t* sec = base + section->VirtualAddress;
-        const size_t size = section->Misc.VirtualSize;
+        const size_t available = image_size - section->VirtualAddress;
+        const size_t size = std::min<size_t>(available, static_cast<size_t>(section->Misc.VirtualSize));
         for (size_t off = 0; off + sizeof(uint64_t) <= size; off += sizeof(uint64_t))
         {
             uint64_t value = 0;
             std::memcpy(&value, sec + off, sizeof(value));
             if (value < start || value >= start + image_size) continue;
-            const auto* candidate = reinterpret_cast<const uint8_t*>(value);
-            if (ReadU32(candidate) != kFatbinMagic) continue;
+            const size_t remaining = static_cast<size_t>((start + image_size) - value);
+            if (remaining < 16) continue;
 
-            const uint64_t declared = ReadU64(candidate + 8);
-            const size_t total = static_cast<size_t>(declared) + kOuterHeader;
-            if (total < 1024 || total > (16u << 20)) continue;
-            if (value + total > start + image_size) continue;
+            const auto* candidate = reinterpret_cast<const uint8_t*>(value);
+            size_t total = 0;
+            if (!SafeValidateFatbinCandidate(candidate, remaining, total)) continue;
 
             fatbin_slots[candidate].push_back(reinterpret_cast<uint64_t*>(sec + off));
         }
     }
 
-    const uint8_t* temporal_fat = nullptr;
-    size_t temporal_fat_size = 0;
-    const TemporalProfile* selected_profile = nullptr;
-    std::vector<uint64_t*> temporal_slots;
+    struct TargetFatbin
+    {
+        const char* kernel_name;
+        const char* short_name;
+        const uint8_t* fat = nullptr;
+        size_t fat_size = 0;
+        std::vector<uint64_t*> slots;
+    };
+
+    TargetFatbin targets[] = {
+        {"Kernel_EstimateIntermMvecsScatter", "IntermMvecsScatter"},
+        {"Kernel_BlendCandidatesFused", "BlendCandidatesFused"},
+    };
+
+    const uint8_t* legacy_temporal_fat = nullptr;
+    size_t legacy_temporal_fat_size = 0;
+    const TemporalProfile* legacy_profile = nullptr;
+    std::vector<uint64_t*> legacy_slots;
 
     for (const auto& pair : fatbin_slots)
     {
         const uint8_t* candidate = pair.first;
         const size_t total = static_cast<size_t>(ReadU64(candidate + 8)) + kOuterHeader;
         const auto* fat_profile = FindTemporalProfile(candidate, total);
-        if (fat_profile != nullptr)
+        if (fat_profile != nullptr && legacy_profile == nullptr)
         {
-            temporal_fat = candidate;
-            temporal_fat_size = total;
-            selected_profile = fat_profile;
-            temporal_slots = pair.second;
-            break;
+            legacy_temporal_fat = candidate;
+            legacy_temporal_fat_size = total;
+            legacy_profile = fat_profile;
+            legacy_slots = pair.second;
+        }
+
+        const std::string name = GetFatbinKernelName(candidate, total);
+        if (!name.empty())
+        {
+            for (auto& target : targets)
+            {
+                if (target.fat == nullptr && name == target.kernel_name)
+                {
+                    target.fat = candidate;
+                    target.fat_size = total;
+                    target.slots = pair.second;
+                    break;
+                }
+            }
         }
     }
 
     std::vector<DescriptorPatch> all_patches;
     std::vector<void*> all_allocations;
+    size_t transfused_fatbin_count = 0;
 
-    if (gBlackwellTransfusionEnabled.load(std::memory_order_relaxed) && temporal_fat != nullptr && selected_profile != nullptr)
+    // Blackwell transfusion is activated when enabled and the primary scatter kernel is found (DLSS 310.9+)
+    if (gBlackwellTransfusionEnabled.load(std::memory_order_relaxed) && targets[0].fat != nullptr)
     {
-        // Blackwell transfusion is ONLY valid for the refactored Kernel_EstimateIntermMvecsScatter (Profile 2 / DLSS-G 3.10.9+).
-        // For older dlfg_kernel profiles (310.1 - 310.8), Blackwell sm_120 PTX was an unfinished prototype and causes instant crashes.
-        if (std::strcmp(selected_profile->descriptor_name, "EstimateIntermMvecsScatter") == 0)
+        for (const auto& target : targets)
         {
-            size_t bw_dummy = 0;
-            if (FindBlackwellPtxEntry(temporal_fat, temporal_fat_size, bw_dummy))
+            if (std::strcmp(target.kernel_name, "Kernel_BlendCandidatesFused") == 0
+                && !gQualityFixEnabled.load(std::memory_order_relaxed)) continue;
+            // The quality target must never make an incomplete temporal patch ready.
+            if (&target != &targets[0] && all_patches.empty()) break;
+            if (target.fat == nullptr || target.slots.empty()) continue;
+
+            std::vector<uint8_t> rebuilt;
+            std::string why;
+            if (BuildBlackwellTransfusionFatbin(target.fat, target.fat_size, target.kernel_name, rebuilt, why))
             {
-                std::vector<uint8_t> rebuilt;
-                std::string why;
-                if (BuildBlackwellTransfusionFatbin(temporal_fat, temporal_fat_size, rebuilt, why))
-                {
                 void* mem = VirtualAlloc(nullptr, rebuilt.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
                 if (mem)
                 {
                     std::memcpy(mem, rebuilt.data(), rebuilt.size());
                     all_allocations.push_back(mem);
 
-                    for (uint64_t* slot : temporal_slots)
+                    for (uint64_t* slot : target.slots)
                     {
                         DWORD old_protect = 0;
                         if (VirtualProtect(slot, sizeof(uint64_t), PAGE_READWRITE, &old_protect) == 0) continue;
@@ -750,46 +982,48 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
                         DWORD ignored = 0;
                         VirtualProtect(slot, sizeof(uint64_t), old_protect, &ignored);
                     }
-
-                    if (!all_patches.empty())
-                    {
-                        gBlackwellTransfusionActive.store(true, std::memory_order_release);
-                        gTransfusedFatbinCount.store(1, std::memory_order_release);
-                        gTransfusedDescriptorCount.store(all_patches.size(), std::memory_order_release);
-                        gPatchedModules.push_back({module, std::move(all_patches), std::move(all_allocations)});
-                        gReady.store(true, std::memory_order_release);
-                        gFailureCode.store(0, std::memory_order_release);
-
-                        Log(L"D157 midpoint fix: redirected %zu %hs descriptor(s) in %s to BLACKWELL TRANSFUSION (sm_120 -> sm_89, branchless, %zu bytes)",
-                            temporal_slots.size(), selected_profile->descriptor_name, path ? path : L"", rebuilt.size());
-                        return true;
-                    }
-                    else
-                    {
-                        VirtualFree(mem, 0, MEM_RELEASE);
-                        all_allocations.clear();
-                    }
+                    transfused_fatbin_count++;
+                    Log(L"D157 midpoint fix: redirected %zu %hs descriptor(s)", target.slots.size(), target.short_name);
                 }
             }
             else
             {
-                Log(L"D157 midpoint fix: Blackwell transfusion failed (%hs); falling back to Ada temporal patch", why.c_str());
-            }
+                Log(L"D157 midpoint fix: Blackwell transfusion for %hs failed (%hs)", target.short_name, why.c_str());
             }
         }
-        else
+
+        if (!all_patches.empty())
         {
-            Log(L"D157 midpoint fix: module uses legacy %hs; Blackwell transfusion bypassed in favor of native Ada temporal patch",
-                selected_profile->descriptor_name);
+            // Retarget all remaining Blackwell containers in-place so the entire pipeline
+            // (Kernel_BlendCandidatesFused, Pyramids, Tensor feeds, etc.) runs sm_89 Blackwell code.
+            const unsigned int retargeted_count =
+                RetargetAllBlackwellContainers(base, image_size, num_sections, first_section);
+
+            const size_t total_descriptors = all_patches.size();
+            gBlackwellTransfusionActive.store(true, std::memory_order_release);
+            gTransfusedFatbinCount.store(retargeted_count > 0 ? retargeted_count : transfused_fatbin_count, std::memory_order_release);
+            gTransfusedDescriptorCount.store(total_descriptors, std::memory_order_release);
+            gPatchedModules.push_back({module, std::move(all_patches), std::move(all_allocations)});
+            gReady.store(true, std::memory_order_release);
+            gFailureCode.store(0, std::memory_order_release);
+
+            Log(L"D157 midpoint fix: %u Blackwell container(s) retargeted in-place (sm_120 -> sm_89), %zu descriptor(s) redirected; scatter=%hs in %s",
+                retargeted_count, total_descriptors, scatter_experiment::kPolicy, path ? path : L"");
+            return true;
         }
     }
+    else if (legacy_profile != nullptr && std::strcmp(legacy_profile->descriptor_name, "EstimateIntermMvecsScatter") != 0)
+    {
+        Log(L"D157 midpoint fix: module uses legacy %hs; Blackwell transfusion bypassed in favor of native Ada temporal patch",
+            legacy_profile->descriptor_name);
+    }
 
-    // Fallback path: Ada temporal midpoint fix on EstimateIntermMvecsScatter
+    // Fallback path: Ada temporal midpoint fix on EstimateIntermMvecsScatter / dlfg_kernel
     gBlackwellTransfusionActive.store(false, std::memory_order_release);
     gTransfusedFatbinCount.store(0, std::memory_order_release);
     gTransfusedDescriptorCount.store(0, std::memory_order_release);
 
-    if (temporal_fat == nullptr || temporal_slots.empty() || selected_profile == nullptr)
+    if (legacy_temporal_fat == nullptr || legacy_slots.empty() || legacy_profile == nullptr)
     {
         Log(L"D157 midpoint fix: no supported temporal descriptor found in %s", path ? path : L"");
         gFailureCode.store(4, std::memory_order_release); // Layout
@@ -798,7 +1032,7 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 
     std::vector<uint8_t> rebuilt;
     std::string why;
-    if (!BuildTemporalFatbin(temporal_fat, temporal_fat_size, *selected_profile, rebuilt, why))
+    if (!BuildTemporalFatbin(legacy_temporal_fat, legacy_temporal_fat_size, *legacy_profile, rebuilt, why))
     {
         Log(L"D157 midpoint fix: fatbin rebuild failed in %s (%hs)", path ? path : L"", why.c_str());
         gFailureCode.store(6, std::memory_order_release);
@@ -815,8 +1049,8 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
     std::memcpy(mem, rebuilt.data(), rebuilt.size());
 
     std::vector<DescriptorPatch> patches;
-    patches.reserve(temporal_slots.size());
-    for (uint64_t* slot : temporal_slots)
+    patches.reserve(legacy_slots.size());
+    for (uint64_t* slot : legacy_slots)
     {
         DWORD old_protect = 0;
         if (VirtualProtect(slot, sizeof(uint64_t), PAGE_READWRITE, &old_protect) == 0) continue;
@@ -841,7 +1075,7 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
     gFailureCode.store(0, std::memory_order_release);
 
     Log(L"D157 midpoint fix: redirected %zu %hs descriptor(s) in %s to temporal-corrected rebuild (%zu bytes)",
-        temporal_slots.size(), selected_profile->descriptor_name, path ? path : L"", rebuilt.size());
+        legacy_slots.size(), legacy_profile->descriptor_name, path ? path : L"", rebuilt.size());
     return true;
 }
 
