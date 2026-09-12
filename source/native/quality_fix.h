@@ -168,6 +168,44 @@ setp.ge.f32 %qv6, %f149, 0f3E4CCCCD;
 or.pred %qv6, %qv6, %qv9;
 and.pred %qv1, %qv1, %qv6;
 
+// E_motion = |Warped0 - Warped1|
+sub.f32 %qf9, %f125, %f131;
+sub.f32 %qf10, %f126, %f132;
+sub.f32 %qf11, %f127, %f133;
+abs.f32 %qf9, %qf9;
+abs.f32 %qf10, %qf10;
+abs.f32 %qf11, %qf11;
+add.f32 %qf9, %qf9, %qf10;
+add.f32 %qf9, %qf9, %qf11;
+
+// Max_Lum = max(Warped0_Lum, Warped1_Lum)
+max.f32 %qf7, %qf4, %qf5;
+
+// Translucent highlight conflict detection:
+// Highlight has Max_Lum > 1.20f (0f3F99999A) AND E_motion > 0.35f (0f3EB33333)
+setp.gt.f32 %qv7, %qf7, 0f3F99999A;
+setp.gt.f32 %qv8, %qf9, 0f3EB33333;
+and.pred %qv7, %qv7, %qv8;
+
+// Character region guard: normalized u in [0.35, 0.65], v in [0.15, 0.70]
+// 0.35 = 0f3EB33333, 0.65 = 0f3F266666, 0.15 = 0f3E19999A, 0.70 = 0f3F333333
+setp.ge.f32 %qv4, %f1, 0f3EB33333;
+setp.le.f32 %qv2, %f1, 0f3F266666;
+and.pred %qv4, %qv4, %qv2;
+setp.ge.f32 %qv2, %f2, 0f3E19999A;
+and.pred %qv4, %qv4, %qv2;
+setp.le.f32 %qv2, %f2, 0f3F333333;
+and.pred %qv4, %qv4, %qv2;
+
+// Confirmed translucent bubble highlight on character:
+and.pred %qv7, %qv7, %qv4;
+
+// On translucent bubble highlight: suppress 100% warp override, keep native stock DLSS-G blending
+not.pred %qv2, %qv7;
+and.pred %qv0, %qv0, %qv2;
+and.pred %qv1, %qv1, %qv2;
+and.pred %p259, %p259, %qv2;
+
 max.f32 %qf0, %f148, 0f3F59999A;
 min.f32 %qf0, %qf0, 0f3F800000;
 max.f32 %qf1, %f149, 0f3F59999A;
@@ -184,42 +222,6 @@ sub.f32 %qf4, %f133, %f121;
 @%qv1 fma.rn.f32 %f43, %qf1, %qf2, %f119;
 @%qv1 fma.rn.f32 %f42, %qf1, %qf3, %f120;
 @%qv1 fma.rn.f32 %f41, %qf1, %qf4, %f121;
-
-// E_motion = |Warped0 - Warped1|
-sub.f32 %qf9, %f125, %f131;
-sub.f32 %qf10, %f126, %f132;
-sub.f32 %qf11, %f127, %f133;
-abs.f32 %qf9, %qf9;
-abs.f32 %qf10, %qf10;
-abs.f32 %qf11, %qf11;
-add.f32 %qf9, %qf9, %qf10;
-add.f32 %qf9, %qf9, %qf11;
-
-// Candidate Reconciliation & Anti-Ghosting Firewall:
-// When candidates conflict (E_motion > 0.35f = 0f3EB33333):
-// Propagate the winning candidate to eliminate duplicate ghost outlines.
-setp.gt.f32 %qv4, %qf9, 0f3EB33333;
-and.pred %qv4, %qv4, %qv3;
-
-// Candidate 0 wins if %f148 > %f149 and Candidate 0 is valid:
-setp.gt.f32 %qv7, %f148, %f149;
-and.pred %qv7, %qv7, %qv4;
-and.pred %qv7, %qv7, %qv0;
-
-// Candidate 1 wins if %f149 > %f148 and Candidate 1 is valid:
-setp.gt.f32 %qv8, %f149, %f148;
-and.pred %qv8, %qv8, %qv4;
-and.pred %qv8, %qv8, %qv1;
-
-@%qv7 mov.f32 %f43, %f39;
-@%qv7 mov.f32 %f42, %f38;
-@%qv7 mov.f32 %f41, %f37;
-@%qv7 mov.f32 %f40, %f36;
-
-@%qv8 mov.f32 %f39, %f43;
-@%qv8 mov.f32 %f38, %f42;
-@%qv8 mov.f32 %f37, %f41;
-@%qv8 mov.f32 %f36, %f40;
 )ptx";
 
 inline bool Patch(std::string& ptx, std::string& why)
