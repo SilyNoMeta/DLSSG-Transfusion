@@ -13,8 +13,8 @@ provides rock-solid HUD protection for single-surface pipelines, and adds `dinpu
 
 ### What's New in Version 1.4.0
 - **DLSS-G Quality Fix (`qualityValidWarp=true`)**:
-  - **Tearing & Disocclusion Artifact Reduction**: Injects runtime PTX patches into NVIDIA's `BlendCandidatesFused` optical flow kernel to prevent premature fallback to unwarped frames, significantly reducing tearing and flickering on thin geometries, wire fences, foliage, and high-frequency motion.
-  - **Calibrated UI Protection & Zero Ghosting**: Carefully tuned flow confidence thresholds (`0.14f` primary floor, `0.08f` secondary firewall, `>0.18f` temporal delta rescue) to freeze static HUD and text elements, completely eliminating UI ghosting, smearing, and trailing during rapid camera pans.
+  - **Tearing & Disocclusion Artifact Elimination**: Injects runtime PTX patches into NVIDIA's `BlendCandidatesFused` optical flow kernel with 100% pure geometric warp on valid motion candidates, eliminating sub-pixel fence and wire tearing without edge smearing.
+  - **Calibrated UI Protection & Zero Ghosting**: Strict temporal delta gate ($>0.25f$) and confidence firewalls freeze static HUD and text elements, completely eliminating UI ghosting, smearing, and trailing during rapid camera pans.
 - **Native HUDless UI Recomposition (UIR)**: Unlocks Streamline UI Recomposition when games tag separate UI and HUDless buffers (e.g. Neverness to Everness / NTE, Arknights: Endfield). Background frames receive clean geometric warping without wire or fence tearing, while the UI is recomposited crisply at presentation time.
 - **dinput8 Proxy Support**: Added `dinput8.dll` wrapper with complete 64-bit export thunk forwarding.
 - **Streamline 2.14+ Interposer Detours**: Robust entry point interception on `sl.interposer.dll` eliminating plugin table dispatch deadlocks and loader-lock hangs.
