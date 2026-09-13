@@ -191,27 +191,40 @@ sub.f32 %qf12, %f133, %f121;
 @%qv1 fma.rn.f32 %f42, %qf1, %qf3, %f120;
 @%qv1 fma.rn.f32 %f41, %qf1, %qf12, %f121;
 
-// Measure candidate disagreement: E_motion = |Warped0 - Warped1|
+// Measure candidate color differences:
 sub.f32 %qf6, %f125, %f131;
 sub.f32 %qf7, %f126, %f132;
 sub.f32 %qf8, %f127, %f133;
-abs.f32 %qf6, %qf6;
-abs.f32 %qf7, %qf7;
-abs.f32 %qf8, %qf8;
-add.f32 %qf6, %qf6, %qf7;
-add.f32 %qf6, %qf6, %qf8;
+
+// E_motion = |D_R| + |D_G| + |D_B|
+abs.f32 %qf9, %qf6;
+abs.f32 %qf10, %qf7;
+abs.f32 %qf11, %qf8;
+add.f32 %qf9, %qf9, %qf10;
+add.f32 %qf9, %qf9, %qf11;
+
+// E_chroma = |D_R - D_G| + |D_G - D_B| + |D_B - D_R|
+// In diffuse shadows on ground, D_R ~= D_G ~= D_B (E_chroma ~ 0.08 < 0.25),
+// preserving smooth temporal interpolation and eliminating shadow jitter/lag!
+// On colored translucent objects (sirens in hedge), E_chroma > 1.10 >> 0.25,
+// triggering Candidate 1 overwriting and eliminating siren wobbling/ghosting!
+sub.f32 %qf12, %qf6, %qf7;
+sub.f32 %qf13, %qf7, %qf8;
+sub.f32 %qf14, %qf8, %qf6;
+abs.f32 %qf12, %qf12;
+abs.f32 %qf13, %qf13;
+abs.f32 %qf14, %qf14;
+add.f32 %qf12, %qf12, %qf13;
+add.f32 %qf12, %qf12, %qf14;
 
 // Candidate Conflict Firewall:
-// When candidates conflict (E_motion > 0.35f = 0f3EB33333):
-setp.gt.f32 %qv4, %qf6, 0f3EB33333;
+// Trigger when motion error > 0.35f (0f3EB33333) AND chromatic error > 0.25f (0f3E800000):
+setp.gt.f32 %qv4, %qf9, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
+setp.gt.f32 %qv7, %qf12, 0f3E800000;
+and.pred %qv4, %qv4, %qv7;
 
-// Candidate 1 (current frame ground truth) overwrites Candidate 0 (past frame estimate) on conflict:
-// 1. At real foreground objects (sirens, shadows, bubble rim), Candidate 1 is the real object and
-//    Candidate 0 is the occluded background. Candidate 1 wins, completely preventing background erasure!
-// 2. At trailing disocclusion zones (hedge behind siren, sand behind bubble), Candidate 1 is the
-//    revealed background and Candidate 0 is the old stale ghost. Candidate 1 wins, completely collapsing ghosts!
-// 3. Wire fences and static geometry agree (E_motion <= 0.35f), maintaining 100% pure warp with zero tearing!
+// Candidate 1 (current frame ground truth) overwrites Candidate 0 on chromatic conflict:
 and.pred %qv8, %qv4, %qv1;
 and.pred %qv8, %qv8, %qv6;
 
