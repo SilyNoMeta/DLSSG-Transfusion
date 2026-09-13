@@ -58,6 +58,25 @@ inline int __stdcall Hook(void* self, void* params, void* commandList, uint32_t 
                 }
             }
         }
+#if QUALITY_CAPTURE
+        if (kind == 3)
+        {
+            uintptr_t table = 0;
+            std::array<uintptr_t,4> methods{};
+            const uintptr_t base = reinterpret_cast<uintptr_t>(provider);
+            std::array<uint8_t,240> payload{};
+            if (Read(params,&table,sizeof(table)) && Read(reinterpret_cast<void*>(table),methods.data(),sizeof(methods))
+                && methods[0] == base+0xbbf0 && methods[1] == base+0x1ba80
+                && methods[2] == base+0x1ba60 && methods[3] == base+0x3f860
+                && Read(static_cast<uint8_t*>(params)+8,payload.data(),payload.size()))
+                candidate_capture::Observe(commandList,payload,x,y,z);
+            else {
+                static std::atomic<bool> rejected{false};
+                if (!rejected.exchange(true)) Log(L"[CAPTURE] blend parameter profile mismatch; skipped");
+            }
+        }
+        else
+#endif
         if (kind)
         {
             uintptr_t vtable = 0;
@@ -109,6 +128,9 @@ inline void Install(HMODULE module)
     }
     struct AccessorProfile { uint32_t rva; std::array<uint8_t, 6> bytes; size_t size; };
     const AccessorProfile accessors[] = {
+#if QUALITY_CAPTURE
+        {0x3f860, {0xb8,0xf0,0,0,0,0xc3}, 6},
+#endif
         {0xbbf0, {0xc2,0,0}, 3},
         {0x1ba80, {0xb8,1,0,0,0,0xc3}, 6},
         {0x1ba60, {0x48,0x8d,0x41,8,0xc3}, 5},

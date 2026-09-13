@@ -1,4 +1,7 @@
 #include "shared.h"
+#if QUALITY_CAPTURE
+#include "candidate_capture.h"
+#endif
 #include "scatter_experiment.h"
 #include "midpoint_fix.h"
 #include "dlssg_provider_policy.h"
@@ -4357,7 +4360,14 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
     }
     if (logInventory)
         LogModuleInventory(snapshot);
+    #if QUALITY_CAPTURE
+    if (snapshot.ngxTemporalPatched) {
+        candidate_capture::logger = [](const wchar_t* message) { Log(L"%s", message); };
+        provider_dispatch_trace::Install(module);
+    }
+#else
     if (snapshot.ngxTemporalPatched && scatter_experiment::kMode == 0) provider_dispatch_trace::Install(module);
+#endif
     return snapshot;
 }
 

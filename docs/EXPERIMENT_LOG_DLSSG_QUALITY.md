@@ -1,5 +1,218 @@
 # DLSS-G Multi-Frame Generation Quality Fix: Comprehensive Experiment & Research Log
 
+## GPU Direct Candidate Capture Probe: Implemented & Validated
+
+### Problem & Diagnostic Root Cause
+The initial CandidateCaptureHarness build failed during smoke test readback with:
+`Mismatch 0: 0 expected 0.5` (readback floats returned all 0).
+
+**Root Causes Identified**:
+1. **D3D12 Descriptor Heap Visibility**: In `source/native/candidate_capture.h`, `job.heap` was created with `D3D12_DESCRIPTOR_HEAP_FLAG_NONE`. Passing a non-shader-visible descriptor to `NvAPI_D3D12_GetCudaSurfaceObject` caused NVAPI to return a dummy surface handle 0 (`job.handle = 0`). Setting `heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;` immediately resolved this, returning a valid GPU surface descriptor handle (`34816`).
+2. **Command List Descriptor Heap Binding**: In `Record()`, D3D12 requires descriptor heaps to be bound prior to dispatch via `list->SetDescriptorHeaps(1, heaps);`. Without this call, GPU surface store instructions (`sust.p.2d.v4.b32.zero`) were dropped by the hardware.
+
+### Validation Status
+- `tests/startup_hooks/build-capture/Release/CandidateCaptureHarness.exe`:
+  **PASSED** (`D3D12_NVAPI_CAPTURE_READBACK_OK: 2359296 floats; actual probe shader created`).
+- CTest Suite: **9/9 tests passed (100%)**.
+- Binary built: `build-capture/dist/version.dll` (Marker: `quality-mode9-candidate-capture-v1`).
+
+### In-Game Capture Instructions
+1. Deploy `build-capture/dist/version.dll` to Neverness to Everness.
+2. Center the police sirens or artifact area in the middle of the screen.
+3. Press **F8** once. Transfusion arms a burst capture of 6 consecutive frames, evaluating the exact 256x256 central region.
+4. Output is written automatically to `capture-output/<PID>-<dispatch>.rgba32f`, `.json`, and `.params`.
+5. Run `python scripts/view_capture.py` to extract all 9 atlas planes (raw warped candidates, unwarped references, confidence weights, UVs, Mode 9 post-firewall outputs, and boolean trigger predicates) into individual PNGs.
+
+---
+
+## Source-isolation A/B result: both rejected for gameplay
+
+User supplied source0.mp4 and source1.mp4 from the NVIDIA NTE recordings folder:
+"They both look like crap to me, shadows jittering and sirens pretty much the same".
+Metadata: both 2560x1440, nominal 120 fps; durations 4.176256 and 4.694011 s.
+Reviewed 1-fps overviews and 12 consecutive crops starting at 2.0 s in each clip.
+Artifacts saved in `scratch/source-ab-review/`. Siren silhouette irregularity
+remains visible in both; no clear winning source is established. The camera
+paths differ, so these are qualitative comparisons, not matched pixel metrics.
+Shadow jitter is user-reported and consistent with the intentional loss of
+RGB temporal diversity in this diagnostic.
+
+Reject both source-isolation builds for gameplay. Retain normal mode 9 with
+QUALITY_DIAGNOSTIC=0 as the last user-reported improved baseline (mode 8 rollback
+also retained). This result does NOT prove both raw candidates are deformed:
+source isolation only applies where both candidates pass checks; auxiliary
+channels and all downstream processing remain active. Runtime activation and
+per-pixel diagnostic coverage are not verified by these recordings.
+
+Further candidate-copy or threshold changes are not supported by this result.
+Needed evidence: a same-scene FG-off reference to establish source-render quality,
+and actual GPU resource captures with candidate validity/overwrite coverage and
+subframe identity. Existing provider dispatch hooks only read CPU parameter
+blocks and do not supply these images. No new quality shader or game deployment
+was made in response to these clips.
+
+---
+
+
+## Next diagnostic: source-isolation A/B
+
+Validation: both Release DLLs built; each passed 8/8 harness checks, full PTX
+and rebuilt fatbin JIT, and 204 synthetic GPU cases. In-game results pending.
+
+Two opt-in builds use mode 9 plus `QUALITY_DIAGNOSTIC=1` (source 0) or `2`
+(source 1). Default is 0/off. After the normal quality policy, where both
+candidates pass its individual geometry/finite/confidence checks, both RGB
+outputs are replaced with the selected raw warped sample. Missing or otherwise
+ineligible pairs keep mode 9 behavior. Auxiliary channels, downstream UI and
+neural processing remain unchanged. Source identity is the kernel's sample
+index; temporal direction has not been independently verified.
+
+These builds are interventions, NOT raw candidate visualizations or GPU
+readbacks. They do not reveal the overwrite mask. Full-screen single-source
+selection can intentionally degrade shadows, occlusions, and motion: evaluate
+only the siren comparison and then restore the normal build. If one source is
+consistently cleaner, source choice is implicated but not proven as the only
+cause. If both are bad, raw GPU readback is still needed to separate input
+warping, auxiliary features, and downstream reconstruction.
+
+Artifacts: `build-source0/dist/version.dll` and `build-source1/dist/version.dll`.
+Markers: `diagnostic-source0-rgb` and `diagnostic-source1-rgb`.
+Configure source/native with SCATTER_EXPERIMENT=9, QUALITY_DIAGNOSTIC=1 or 2,
+and the existing Streamline path into the respective build directory. Configure
+the harness identically under `tests/startup_hooks/build-source0` or `build-source1`.
+The GPU test accepts that directory as its argument and detects the diagnostic
+marker in the exported policy.
+
+Test the same short camera sweep at 6x separately with each DLL, restarting the
+game between replacements. Keep other settings fixed and label recordings
+source0/source1. Restore `build-siren/dist/version.dll` afterward. No game files
+are replaced by preparation of these diagnostics.
+
+---
+
+
+## User recording review: 6x, 19:47:20 (September 13)
+
+Input: `C:/Users/TonyJoaca/Videos/NVIDIA/NTE (Neverness To Everness)/NTE (Neverness To Everness) 2026.09.13 - 19.47.20.15.mp4`.
+Metadata: AV1, 2560x1440, nominal 120 fps, container duration 4.942356 s.
+User reports 6x, selected because the artifact is most noticeable there.
+The recording itself does not verify the loaded DLL or label generated frames.
+
+Inspected overview samples at 2 fps and consecutive cropped sequences starting
+at 1.0 and 3.0 s (24 captured frames each), with a native-resolution 6-frame detail
+starting at 1.05 s. Artifacts saved under `scratch/siren6x-review/`.
+The red dome's left boundary develops horizontal protrusions/missing strips;
+the blue dome also develops irregular edges. Shape integrity varies across
+adjacent captured frames. The roof/mount remains comparatively coherent in these
+crops, although background foliage edges also break up. This is not merely a
+uniform translucent afterimage: local silhouette deformation is clearly visible.
+
+Interpretation: spatial correspondence/occlusion errors, spatially inconsistent
+candidate selection, or downstream reconstruction are plausible. The recording
+cannot locate the first faulty stage, establish which candidate is correct, or
+measure a specific frame delay. Do not label every sixth captured frame as real:
+120-fps recording need not sample the presentation stream one-to-one.
+
+Next diagnostic should compare the two pre-network warped candidates and the
+actual overwrite predicate in the affected region, with resource/frame identity
+and interpolation phase. If candidates are already deformed, investigate their
+motion/occlusion inputs; if clean candidates yield a deformed output, investigate
+selection and downstream features. Do not use this clip alone to justify another
+threshold reduction or a fixed motion/time offset. No shader changes made during
+this video review; retain mode 9 and the mode 8 rollback.
+
+---
+
+
+## Follow-up: shadows acceptable, siren ghosting remains (mode 9)
+
+User feedback on mode 8: "Shadows look pretty good to me, sirens are still pretty
+ ghosting". This is a subjective in-game result; it does not establish which
+ internal predicate misses the sirens.
+
+Mode 9 (`quality-siren-chroma025-v1`) tests whether mode 8's retained high chroma
+threshold excludes weaker translucent conflicts. The only executable PTX change
+relative to mode 8 is signed chroma threshold 0.70 -> 0.25. Total RGB difference
+must still exceed 0.35; the brightness-scale shadow veto, confidence/geometry
+checks, 100% warp, and candidate copy are identical. Mode 8 and its DLL remain
+available for rollback. Mode 0 remains the default.
+
+Artifact: `build-siren/dist/version.dll`. Configure production and harness builds
+with `SCATTER_EXPERIMENT=9`, using `build-siren` and
+`tests/startup_hooks/build-siren`, respectively. Test command:
+`python scripts/test_shadow_scale_gpu.py tests/startup_hooks/build-siren`.
+Patch message: `SIREN CHROMA 0.25 with SHADOW SCALE V1 experimental veto applied`.
+
+Validation: 8/8 harness checks passed; full kernel and rebuilt fatbin JIT passed;
+204 synthetic GPU cases passed for each of modes 8 and 9. New moderate-color
+conflicts in both temporal directions copy only in mode 9. Scalar shadows and
+near-scalar brick colors stay protected. Exported instruction comparison confirms
+that only the chroma threshold changed. Release build succeeded with missing
+Detours debug-symbol warnings. No game deployment was performed.
+
+In-game siren benefit is unverified. Lowering this threshold may regress textured
+or colored-light shadows that do not satisfy the scale model, and may overwrite
+other legitimate color transitions. Compare the same siren route and brick
+shadows at the same multiplier/base frame rate. If sirens remain unchanged,
+inspect actual candidate colors and trigger masks instead of assuming another
+threshold reduction is justified.
+
+---
+
+
+## September 13 follow-up: corrections and shadow-scale-v1 experiment
+
+The historical claims below are not guarantees. Section 7.2's ratio bound is
+false: red `(1,0,0)` versus shadowed `(0.5,0,0)` gives chroma/motion = 2.
+The shader uses signed channel differences, unlike the absolute-difference
+formula in the derivation. Captured-video trigger rates are proxies, not internal
+candidate measurements. Candidate 1 is not intermediate-frame ground truth;
+exact neural mixing weights have not been established.
+
+Opt-in `SCATTER_EXPERIMENT=8` adds a shadow veto before the existing candidate
+copy. Mode 0 stays unchanged. The 100% warp, 0.70 signed chroma threshold,
+confidence checks, and auxiliary-channel copying are retained for comparison.
+The veto detects positive-aligned RGB vectors with squared relative
+least-squares residual <= 0.01:
+
+`1 - dot(A,B)^2 / (dot(A,A) * dot(B,B))`
+
+RGB vectors are normalized by absolute channel sum to limit arithmetic range;
+the final comparison avoids division. Both sums must exceed 0.01, otherwise the
+old rule remains. Thresholds are experimental. Scalar brightness changes are
+protected across surface saturations. Textured misalignment, colored lighting,
+tonemapping, and near-proportional emissive changes remain limitations. Hard
+thresholds remain; helmet motion and candidate directionality are not repaired.
+
+Build: configure `source/native` into `build-shadow` with
+`-DSCATTER_EXPERIMENT=8 -DSTREAMLINE_ROOT=D:/Coding/DLSSGUnlock/Streamline`, then
+`cmake --build build-shadow --config Release`.
+Configure `tests/startup_hooks` into `tests/startup_hooks/build-shadow` with the
+same definitions. Run:
+
+```
+ctest --test-dir tests/startup_hooks/build-shadow -C Release --output-on-failure
+python scripts/test_shadow_scale_gpu.py
+```
+
+Validation: Release build succeeded (missing Detours debug symbols warnings);
+8/8 CTest checks passed; full patched PTX and production rebuilt fatbin JIT loaded;
+198 GPU cases passed, including both shadow directions, saturated surfaces,
+exposure scales, sirens, missing vectors, and low current confidence. The GPU test
+executes the harness-exported experimental policy, replacing only its provider
+flag load with zero for synthetic inputs. Full kernel/fatbin JIT uses the actual
+exports. This does not validate in-game quality or GPU performance.
+
+Artifact: `build-shadow/dist/version.dll`. Marker: `quality-shadow-scale-v1`.
+Patch message: `SHADOW SCALE V1 experimental veto applied`.
+No game files were replaced. Compare with mode 0 at the same base frame rate
+and multiplier: brick shadows, sirens, fences, then helmet. Watch for siren
+regressions as well as shadow improvement. Actual candidate/mask captures and
+subframe labels remain future work; no instrumentation was added in this step.
+
+---
+
+
 > **Target Audience**: Next AI assistant or graphics engineer continuing research on DLSS-G Frame Generation quality in *Neverness to Everness* (UE5) and other titles running multi-frame generation (2x, 3x, 4x, 5x).
 > **Last Updated**: September 13, 2026 (Branch `main`, Commit `ceebde5`).
 

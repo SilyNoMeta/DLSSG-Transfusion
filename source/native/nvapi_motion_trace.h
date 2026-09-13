@@ -39,6 +39,9 @@ inline uint32_t Identify(const char* name)
     }
     if (std::strcmp(copy, "Kernel_EstimateIntermMvecsScatter") == 0) return 1;
     if (std::strcmp(copy, "Kernel_InputMvecProcessing") == 0) return 2;
+#if QUALITY_CAPTURE
+    if (std::strcmp(copy, "Kernel_BlendCandidatesFused") == 0) return 3;
+#endif
     return 0;
 }
 inline int __stdcall HookCreate(void* device, void* module, const char* name, void** function)

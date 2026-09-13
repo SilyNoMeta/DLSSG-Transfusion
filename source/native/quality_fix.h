@@ -5,6 +5,10 @@
 #include <string_view>
 #include "scatter_experiment.h"
 
+#ifndef QUALITY_DIAGNOSTIC
+#define QUALITY_DIAGNOSTIC 0
+#endif
+static_assert(QUALITY_DIAGNOSTIC >= 0 && QUALITY_DIAGNOSTIC <= 2);
 namespace quality_fix
 {
 // Runs after candidate construction and before the provider's UI composition.
@@ -204,10 +208,8 @@ add.f32 %qf9, %qf9, %qf10;
 add.f32 %qf9, %qf9, %qf11;
 
 // E_chroma = |D_R - D_G| + |D_G - D_B| + |D_B - D_R|
-// In diffuse shadows on ground (including terracotta bricks where E_chroma <= 0.60),
-// E_chroma < 0.70 preserves smooth temporal interpolation and eliminates shadow jitter/lag!
-// On colored translucent objects (sirens in hedge), E_chroma > 1.10 >> 0.70,
-// triggering Candidate 1 overwriting and eliminating siren wobbling/ghosting!
+// Absolute thresholds are scene-dependent heuristics, not shadow/light classifiers.
+// Modes 8 and 9 add brightness-scale protection before candidate copying.
 sub.f32 %qf12, %qf6, %qf7;
 sub.f32 %qf13, %qf7, %qf8;
 sub.f32 %qf14, %qf8, %qf6;
@@ -224,7 +226,7 @@ and.pred %qv4, %qv4, %qv3;
 setp.gt.f32 %qv7, %qf12, 0f3F333333;
 and.pred %qv4, %qv4, %qv7;
 
-// Candidate 1 (current frame ground truth) overwrites Candidate 0 on chromatic conflict:
+// Prefer Candidate 1 on chromatic conflict; its intermediate-frame correctness is unproven.
 and.pred %qv8, %qv4, %qv1;
 and.pred %qv8, %qv8, %qv6;
 
@@ -232,6 +234,55 @@ and.pred %qv8, %qv8, %qv6;
 @%qv8 mov.f32 %f38, %f42;
 @%qv8 mov.f32 %f37, %f41;
 @%qv8 mov.f32 %f36, %f40;
+)ptx";
+
+// Experimental shadow veto. Independent of the existing signed chroma threshold.
+// Normalize each RGB by its L1 magnitude before computing squared cosine residual:
+// 1 - dot(A,B)^2 / (dot(A,A)*dot(B,B)). Scalar brightness changes yield zero.
+// Require positive alignment and sufficient signal; very dark inputs retain the existing conflict rule.
+// Threshold 0.01 is exploratory (10% relative least-squares residual), not calibrated.
+inline constexpr std::string_view kShadowVeto = R"ptx(
+// QUALITY_SHADOW_SCALE_V1
+abs.f32 %qf0, %f125;
+abs.f32 %qf1, %f126;
+abs.f32 %qf2, %f127;
+add.f32 %qf0, %qf0, %qf1;
+add.f32 %qf0, %qf0, %qf2;
+abs.f32 %qf1, %f131;
+abs.f32 %qf2, %f132;
+abs.f32 %qf3, %f133;
+add.f32 %qf1, %qf1, %qf2;
+add.f32 %qf1, %qf1, %qf3;
+setp.gt.f32 %qv10, %qf0, 0f3C23D70A;
+setp.gt.f32 %qv11, %qf1, 0f3C23D70A;
+and.pred %qv10, %qv10, %qv11;
+max.f32 %qf0, %qf0, 0f3C23D70A;
+max.f32 %qf1, %qf1, 0f3C23D70A;
+div.rn.f32 %qf2, %f125, %qf0;
+div.rn.f32 %qf3, %f126, %qf0;
+div.rn.f32 %qf4, %f127, %qf0;
+div.rn.f32 %qf5, %f131, %qf1;
+div.rn.f32 %qf6, %f132, %qf1;
+div.rn.f32 %qf7, %f133, %qf1;
+mul.f32 %qf8, %qf2, %qf5;
+fma.rn.f32 %qf8, %qf3, %qf6, %qf8;
+fma.rn.f32 %qf8, %qf4, %qf7, %qf8;
+setp.gt.f32 %qv11, %qf8, 0f00000000;
+and.pred %qv10, %qv10, %qv11;
+mul.f32 %qf9, %qf2, %qf2;
+fma.rn.f32 %qf9, %qf3, %qf3, %qf9;
+fma.rn.f32 %qf9, %qf4, %qf4, %qf9;
+mul.f32 %qf10, %qf5, %qf5;
+fma.rn.f32 %qf10, %qf6, %qf6, %qf10;
+fma.rn.f32 %qf10, %qf7, %qf7, %qf10;
+mul.f32 %qf9, %qf9, %qf10;
+mul.f32 %qf8, %qf8, %qf8;
+sub.f32 %qf8, %qf9, %qf8;
+mul.f32 %qf9, %qf9, 0f3C23D70A;
+setp.le.f32 %qv11, %qf8, %qf9;
+and.pred %qv10, %qv10, %qv11;
+not.pred %qv10, %qv10;
+and.pred %qv8, %qv8, %qv10;
 )ptx";
 
 inline bool Patch(std::string& ptx, std::string& why)
@@ -256,7 +307,7 @@ inline bool Patch(std::string& ptx, std::string& why)
         return false;
     }
     std::string policy;
-    if constexpr (scatter_experiment::kMode == 0 || scatter_experiment::kMode == 6 || scatter_experiment::kMode == 7)
+    if constexpr (scatter_experiment::kMode == 0 || scatter_experiment::kMode == 6 || scatter_experiment::kMode == 7 || scatter_experiment::kMode == 8 || scatter_experiment::kMode == 9)
     {
         policy = std::string(kPolicyE2);
         if constexpr (scatter_experiment::kMode == 6)
@@ -283,14 +334,63 @@ inline bool Patch(std::string& ptx, std::string& why)
                 policy.replace(pos, from.size(), to);
         }
     }
+    if constexpr (scatter_experiment::kMode == 8 || scatter_experiment::kMode == 9)
+    {
+        const auto copy = policy.find("@%qv8 mov.f32 %f39, %f43;");
+        if (copy == std::string::npos) { why = "shadow experiment insertion site missing"; return false; }
+        policy.insert(copy, kShadowVeto);
+    }
+    if constexpr (scatter_experiment::kMode == 9)
+    {
+        // Broaden chromatic conflict coverage while retaining mode 8's shadow veto.
+        // Keep total RGB error at 0.35 to avoid reacting to small color fluctuations.
+        if (!scatter_experiment::ReplaceOnce(policy,
+            "setp.gt.f32 %qv7, %qf12, 0f3F333333;",
+            "setp.gt.f32 %qv7, %qf12, 0f3E800000;"))
+        { why = "siren experiment threshold site mismatch"; return false; }
+        policy += "\n// QUALITY_SIREN_CHROMA_025_V1\n";
+    }
+    if constexpr (QUALITY_DIAGNOSTIC != 0)
+    {
+        // Source-isolation intervention, NOT raw GPU readback. Retain auxiliary
+        // features and the downstream network. Require both usable candidates.
+        static_assert(scatter_experiment::kMode == 9, "Diagnostics require mode 9");
+        policy += "\nand.pred %qv12, %qv0, %qv1;\n";
+        if constexpr (QUALITY_DIAGNOSTIC == 1)
+            policy += R"ptx(
+// QUALITY_DIAGNOSTIC_SOURCE0
+@%qv12 mov.f32 %f39, %f125;
+@%qv12 mov.f32 %f38, %f126;
+@%qv12 mov.f32 %f37, %f127;
+@%qv12 mov.f32 %f43, %f125;
+@%qv12 mov.f32 %f42, %f126;
+@%qv12 mov.f32 %f41, %f127;
+)ptx";
+        else
+            policy += R"ptx(
+// QUALITY_DIAGNOSTIC_SOURCE1
+@%qv12 mov.f32 %f39, %f131;
+@%qv12 mov.f32 %f38, %f132;
+@%qv12 mov.f32 %f37, %f133;
+@%qv12 mov.f32 %f43, %f131;
+@%qv12 mov.f32 %f42, %f132;
+@%qv12 mov.f32 %f41, %f133;
+)ptx";
+    }
     normalized.insert(site, policy);
     normalized.insert(registers, kRegisters);
     ptx = std::move(normalized);
-    why = (scatter_experiment::kMode == 6)
+    why = (scatter_experiment::kMode == 9)
+        ? "SIREN CHROMA 0.25 with SHADOW SCALE V1 experimental veto applied"
+        : (scatter_experiment::kMode == 8)
+        ? "SHADOW SCALE V1 experimental veto applied"
+        : (scatter_experiment::kMode == 6)
         ? "VALID WARP QUALITY V4-E2 (geometric warp) applied"
         : (scatter_experiment::kMode == 5)
             ? "VALID WARP QUALITY V4-E1 (25% agreement) applied"
             : "VALID WARP QUALITY (pure 100% warp) applied";
+    if constexpr (QUALITY_DIAGNOSTIC == 1) why = "DIAGNOSTIC SOURCE 0 RGB isolation applied (not a quality fix)";
+    if constexpr (QUALITY_DIAGNOSTIC == 2) why = "DIAGNOSTIC SOURCE 1 RGB isolation applied (not a quality fix)";
     return true;
 }
 }

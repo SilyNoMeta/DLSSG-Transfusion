@@ -10,3 +10,16 @@ tests/live_control_harness/build/
 /*.dll
 /*.asi
 /DLSSG-Transfusion.json
+
+/build-shadow/
+/tests/startup_hooks/build-shadow/
+
+/build-siren/
+/tests/startup_hooks/build-siren/
+
+/build-source*/
+/tests/startup_hooks/build-source*/
+
+/build-capture/
+/capture-output/
+/tests/startup_hooks/build-capture/

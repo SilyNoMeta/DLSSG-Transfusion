@@ -6,9 +6,20 @@
 #define SCATTER_EXPERIMENT 0
 #endif
 namespace scatter_experiment {
-static_assert(SCATTER_EXPERIMENT >= 0 && SCATTER_EXPERIMENT <= 7);
+static_assert(SCATTER_EXPERIMENT >= 0 && SCATTER_EXPERIMENT <= 9);
 inline constexpr int kMode = SCATTER_EXPERIMENT;
-inline constexpr const char* kName = kMode == 1 ? "quality-v4-A-consistency"
+#ifndef QUALITY_DIAGNOSTIC
+#define QUALITY_DIAGNOSTIC 0
+#endif
+#ifndef QUALITY_CAPTURE
+#define QUALITY_CAPTURE 0
+#endif
+inline constexpr const char* kName = QUALITY_CAPTURE ? "quality-mode9-candidate-capture-v1"
+    : QUALITY_DIAGNOSTIC == 1 ? "diagnostic-source0-rgb"
+    : QUALITY_DIAGNOSTIC == 2 ? "diagnostic-source1-rgb"
+    : kMode == 9 ? "quality-siren-chroma025-v1"
+    : kMode == 8 ? "quality-shadow-scale-v1"
+    : kMode == 1 ? "quality-v4-A-consistency"
     : kMode == 7 ? "v1.4.0-pure-warp"
     : kMode == 6 ? "quality-v4-E2-geometric-warp"
     : kMode == 5 ? "quality-v4-E1-relaxed-agreement"
@@ -29,7 +40,7 @@ inline bool ReplaceOnce(std::string& text, const std::string& from, const std::s
 }
 inline bool Patch(std::string& ptx, std::string& why)
 {
-    if constexpr (kMode == 0 || kMode == 3 || kMode == 4 || kMode == 5 || kMode == 6 || kMode == 7) { why = kPolicy; return true; }
+    if constexpr (kMode == 0 || kMode == 3 || kMode == 4 || kMode == 5 || kMode == 6 || kMode == 7 || kMode == 8 || kMode == 9) { why = kPolicy; return true; }
     std::string text = ptx;
     text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
     while (!text.empty() && text.back() == '\0') text.pop_back();
