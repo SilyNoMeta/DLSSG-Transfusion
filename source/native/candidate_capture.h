@@ -209,7 +209,7 @@ inline bool Initialize(ID3D12GraphicsCommandList* list) {
     HMODULE pin{};
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
         reinterpret_cast<LPCWSTR>(&Initialize),&pin);
-    failed = false; Report(L"[CAPTURE] ready: center sirens, press F8 once; six 256x256 probes");
+    failed = false;    Report(L"[CAPTURE] ready: center sirens, press F10 or Insert once; six 256x256 probes");
     return true;
 }
 
@@ -225,7 +225,11 @@ inline void Observe(void* commandList, const std::array<uint8_t,240>& params, UI
         }
         SaveCompleted();
         DWORD foregroundProcess=0; GetWindowThreadProcessId(GetForegroundWindow(),&foregroundProcess);
-        const bool pressed = foregroundProcess == GetCurrentProcessId() && (GetAsyncKeyState(VK_F8)&0x8000);
+        const bool pressed = foregroundProcess == GetCurrentProcessId() && (
+            (GetAsyncKeyState(VK_F10) & 0x8000) != 0 ||
+            (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0 ||
+            (((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) && ((GetAsyncKeyState(VK_F8) & 0x8000) != 0))
+        );
         if (pressed && !keyDown && jobs.empty()) { remaining=maxJobs; Report(L"[CAPTURE] burst armed"); }
         keyDown = pressed;
         if (!remaining) return;
