@@ -206,34 +206,43 @@ add.f32 %qf6, %qf6, %qf8;
 setp.gt.f32 %qv4, %qf6, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
 
-// Specular foreground highlight protection (bubble rim over dark cable/background):
-// Warped1 RGB sum > 1.80f (0f3FE66666) AND Warped0 RGB sum < 1.20f (0f3F99999A)
-setp.gt.f32 %qv10, %qf5, 0f3FE66666;
-setp.lt.f32 %qv2, %qf4, 0f3F99999A;
-and.pred %qv10, %qv10, %qv2;
-not.pred %qv10, %qv10;
+// Measure candidate temporal warp deviation from its unwarped reference:
+// E_dev0 = |Warped0 - Unwarped0|
+sub.f32 %qf10, %f125, %f115;
+sub.f32 %qf11, %f126, %f116;
+sub.f32 %qf12, %f127, %f117;
+abs.f32 %qf10, %qf10;
+abs.f32 %qf11, %qf11;
+abs.f32 %qf12, %qf12;
+add.f32 %qf10, %qf10, %qf11;
+add.f32 %qf10, %qf10, %qf12;
 
-// Symmetric ghost collapse with high-confidence feature protection:
+// E_dev1 = |Warped1 - Unwarped1|
+sub.f32 %qf13, %f131, %f119;
+sub.f32 %qf14, %f132, %f120;
+sub.f32 %qf15, %f133, %f121;
+abs.f32 %qf13, %qf13;
+abs.f32 %qf14, %qf14;
+abs.f32 %qf15, %qf15;
+add.f32 %qf13, %qf13, %qf14;
+add.f32 %qf13, %qf13, %qf15;
+
 // Candidate 0 wins if:
-// 1. Candidate 0 has higher confidence: conf0 > conf1 + 0.10f
-// 2. Candidate 1 is a low-confidence/failing ghost: conf1 < 0.42f (0f3ED70A3D)
-// 3. NOT specular foreground rim (%qv10)
-// 4. Candidate 0 is geometrically valid (%qv0) and candidates conflict (%qv4)
-add.f32 %qf9, %f149, 0f3DCCCCCD;
-setp.gt.f32 %qv7, %f148, %qf9;
-setp.lt.f32 %qv2, %f149, 0f3ED70A3D;
+// 1. conf0 > conf1
+// 2. Candidate 1 does NOT match Frame 1 (E_dev1 > 0.35f = 0f3EB33333), confirming Candidate 1 is a ghost!
+// (Protects Candidate 1 when it is a real foreground feature matching Frame 1, like the bubble rim!)
+setp.gt.f32 %qv7, %f148, %f149;
+setp.gt.f32 %qv2, %qf13, 0f3EB33333;
 and.pred %qv7, %qv7, %qv2;
-and.pred %qv7, %qv7, %qv10;
 and.pred %qv7, %qv7, %qv4;
 and.pred %qv7, %qv7, %qv0;
 
 // Candidate 1 wins if:
-// 1. Candidate 1 has higher confidence: conf1 > conf0 + 0.10f
-// 2. Candidate 0 is a low-confidence/failing ghost: conf0 < 0.42f (0f3ED70A3D)
-// 3. Candidate 1 is geometrically valid (%qv1) and candidates conflict (%qv4)
-add.f32 %qf10, %f148, 0f3DCCCCCD;
-setp.gt.f32 %qv8, %f149, %qf10;
-setp.lt.f32 %qv2, %f148, 0f3ED70A3D;
+// 1. conf1 > conf0
+// 2. Candidate 0 does NOT match Frame 0 (E_dev0 > 0.35f = 0f3EB33333), confirming Candidate 0 is a ghost!
+// (Protects Candidate 0 when it is a real foreground feature matching Frame 0!)
+setp.gt.f32 %qv8, %f149, %f148;
+setp.gt.f32 %qv2, %qf10, 0f3EB33333;
 and.pred %qv8, %qv8, %qv2;
 and.pred %qv8, %qv8, %qv4;
 and.pred %qv8, %qv8, %qv1;
