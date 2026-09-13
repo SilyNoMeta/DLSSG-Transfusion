@@ -206,28 +206,17 @@ add.f32 %qf6, %qf6, %qf8;
 setp.gt.f32 %qv4, %qf6, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
 
-// Guard: Candidate 1 is a bright foreground translucent feature (e.g. bubble rim) over darker background:
-// Lum1 > Lum0 + 0.25f (0f3E800000)
-add.f32 %qf9, %qf4, 0f3E800000;
-setp.gt.f32 %qv2, %qf5, %qf9;
-
-// Candidate 0 wins IF: (conf0 > conf1) AND NOT cand1_is_bright_fg
-setp.gt.f32 %qv7, %f148, %f149;
-not.pred %qv9, %qv2;
-and.pred %qv7, %qv7, %qv9;
-and.pred %qv7, %qv7, %qv4;
-and.pred %qv7, %qv7, %qv0;
-
-// Candidate 1 wins IF: (conf1 > conf0) OR cand1_is_bright_fg
-setp.gt.f32 %qv8, %f149, %f148;
-or.pred %qv8, %qv8, %qv2;
+// Trailing ghost collapse:
+// Candidate 0 has failed/low confidence (conf0 < 0.45f = 0f3EE66666),
+// while Candidate 1 has significantly higher confidence (conf1 > conf0 + 0.30f = 0f3E99999A).
+// Candidate 0 never overwrites Candidate 1, protecting moving foreground geometry (bubble outline)
+// and preventing shadow / cloak tearing.
+setp.lt.f32 %qv2, %f148, 0f3EE66666;
+add.f32 %qf9, %f148, 0f3E99999A;
+setp.gt.f32 %qv8, %f149, %qf9;
+and.pred %qv8, %qv8, %qv2;
 and.pred %qv8, %qv8, %qv4;
 and.pred %qv8, %qv8, %qv1;
-
-@%qv7 mov.f32 %f43, %f39;
-@%qv7 mov.f32 %f42, %f38;
-@%qv7 mov.f32 %f41, %f37;
-@%qv7 mov.f32 %f40, %f36;
 
 @%qv8 mov.f32 %f39, %f43;
 @%qv8 mov.f32 %f38, %f42;
