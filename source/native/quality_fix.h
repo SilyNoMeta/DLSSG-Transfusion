@@ -204,9 +204,9 @@ add.f32 %qf9, %qf9, %qf10;
 add.f32 %qf9, %qf9, %qf11;
 
 // E_chroma = |D_R - D_G| + |D_G - D_B| + |D_B - D_R|
-// In diffuse shadows on ground, D_R ~= D_G ~= D_B (E_chroma ~ 0.08 < 0.25),
-// preserving smooth temporal interpolation and eliminating shadow jitter/lag!
-// On colored translucent objects (sirens in hedge), E_chroma > 1.10 >> 0.25,
+// In diffuse shadows on ground (including terracotta bricks where E_chroma <= 0.60),
+// E_chroma < 0.70 preserves smooth temporal interpolation and eliminates shadow jitter/lag!
+// On colored translucent objects (sirens in hedge), E_chroma > 1.10 >> 0.70,
 // triggering Candidate 1 overwriting and eliminating siren wobbling/ghosting!
 sub.f32 %qf12, %qf6, %qf7;
 sub.f32 %qf13, %qf7, %qf8;
@@ -218,10 +218,10 @@ add.f32 %qf12, %qf12, %qf13;
 add.f32 %qf12, %qf12, %qf14;
 
 // Candidate Conflict Firewall:
-// Trigger when motion error > 0.35f (0f3EB33333) AND chromatic error > 0.25f (0f3E800000):
+// Trigger when motion error > 0.35f (0f3EB33333) AND chromatic error > 0.70f (0f3F333333):
 setp.gt.f32 %qv4, %qf9, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
-setp.gt.f32 %qv7, %qf12, 0f3E800000;
+setp.gt.f32 %qv7, %qf12, 0f3F333333;
 and.pred %qv4, %qv4, %qv7;
 
 // Candidate 1 (current frame ground truth) overwrites Candidate 0 on chromatic conflict:
