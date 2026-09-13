@@ -206,17 +206,42 @@ add.f32 %qf6, %qf6, %qf8;
 setp.gt.f32 %qv4, %qf6, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
 
-// Trailing ghost collapse:
-// Candidate 0 has failed/low confidence (conf0 < 0.45f = 0f3EE66666),
-// while Candidate 1 has significantly higher confidence (conf1 > conf0 + 0.30f = 0f3E99999A).
-// Candidate 0 never overwrites Candidate 1, protecting moving foreground geometry (bubble outline)
-// and preventing shadow / cloak tearing.
-setp.lt.f32 %qv2, %f148, 0f3EE66666;
-add.f32 %qf9, %f148, 0f3E99999A;
-setp.gt.f32 %qv8, %f149, %qf9;
+// Specular foreground highlight protection (bubble rim over dark cable/background):
+// Warped1 RGB sum > 1.80f (0f3FE66666) AND Warped0 RGB sum < 1.20f (0f3F99999A)
+setp.gt.f32 %qv10, %qf5, 0f3FE66666;
+setp.lt.f32 %qv2, %qf4, 0f3F99999A;
+and.pred %qv10, %qv10, %qv2;
+not.pred %qv10, %qv10;
+
+// Symmetric ghost collapse with high-confidence feature protection:
+// Candidate 0 wins if:
+// 1. Candidate 0 has higher confidence: conf0 > conf1 + 0.10f
+// 2. Candidate 1 is a low-confidence/failing ghost: conf1 < 0.42f (0f3ED70A3D)
+// 3. NOT specular foreground rim (%qv10)
+// 4. Candidate 0 is geometrically valid (%qv0) and candidates conflict (%qv4)
+add.f32 %qf9, %f149, 0f3DCCCCCD;
+setp.gt.f32 %qv7, %f148, %qf9;
+setp.lt.f32 %qv2, %f149, 0f3ED70A3D;
+and.pred %qv7, %qv7, %qv2;
+and.pred %qv7, %qv7, %qv10;
+and.pred %qv7, %qv7, %qv4;
+and.pred %qv7, %qv7, %qv0;
+
+// Candidate 1 wins if:
+// 1. Candidate 1 has higher confidence: conf1 > conf0 + 0.10f
+// 2. Candidate 0 is a low-confidence/failing ghost: conf0 < 0.42f (0f3ED70A3D)
+// 3. Candidate 1 is geometrically valid (%qv1) and candidates conflict (%qv4)
+add.f32 %qf10, %f148, 0f3DCCCCCD;
+setp.gt.f32 %qv8, %f149, %qf10;
+setp.lt.f32 %qv2, %f148, 0f3ED70A3D;
 and.pred %qv8, %qv8, %qv2;
 and.pred %qv8, %qv8, %qv4;
 and.pred %qv8, %qv8, %qv1;
+
+@%qv7 mov.f32 %f43, %f39;
+@%qv7 mov.f32 %f42, %f38;
+@%qv7 mov.f32 %f41, %f37;
+@%qv7 mov.f32 %f40, %f36;
 
 @%qv8 mov.f32 %f39, %f43;
 @%qv8 mov.f32 %f38, %f42;
