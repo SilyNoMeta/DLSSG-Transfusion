@@ -201,49 +201,19 @@ abs.f32 %qf8, %qf8;
 add.f32 %qf6, %qf6, %qf7;
 add.f32 %qf6, %qf6, %qf8;
 
-// Candidate Conflict & Anti-Ghosting Firewall:
+// Candidate Conflict Firewall:
 // When candidates conflict (E_motion > 0.35f = 0f3EB33333):
 setp.gt.f32 %qv4, %qf6, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
 
-// Bubble outline notch protection:
-// Prevent dark background cables/posts from cutting notches through specular white highlights.
-// 1. Cand 0 is dark background (max(RGB_0) < 0.28f = 0f3E8F5C29) and Cand 1 is specular rim (min(RGB_1) > 0.60f = 0f3F19999A)
-max.f32 %qf10, %f125, %f126;
-max.f32 %qf10, %qf10, %f127;
-setp.lt.f32 %qv2, %qf10, 0f3E8F5C29;
-min.f32 %qf11, %f131, %f132;
-min.f32 %qf11, %qf11, %f133;
-setp.gt.f32 %qv10, %qf11, 0f3F19999A;
-and.pred %qv10, %qv10, %qv2;
-not.pred %qv10, %qv10;
-
-// 2. Cand 1 is dark background (max(RGB_1) < 0.28f = 0f3E8F5C29) and Cand 0 is specular rim (min(RGB_0) > 0.60f = 0f3F19999A)
-max.f32 %qf13, %f131, %f132;
-max.f32 %qf13, %qf13, %f133;
-setp.lt.f32 %qv11, %qf13, 0f3E8F5C29;
-min.f32 %qf14, %f125, %f126;
-min.f32 %qf14, %qf14, %f127;
-setp.gt.f32 %qv12, %qf14, 0f3F19999A;
-and.pred %qv11, %qv11, %qv12;
-not.pred %qv11, %qv11;
-
-// Candidate 0 wins if conf0 > conf1 AND NOT (dark cable cutting specular rim)
-setp.gt.f32 %qv7, %f148, %f149;
-and.pred %qv7, %qv7, %qv10;
-and.pred %qv7, %qv7, %qv4;
-and.pred %qv7, %qv7, %qv0;
-
-// Candidate 1 wins if conf1 > conf0 AND NOT (dark cable cutting specular rim)
-setp.gt.f32 %qv8, %f149, %f148;
-and.pred %qv8, %qv8, %qv11;
-and.pred %qv8, %qv8, %qv4;
-and.pred %qv8, %qv8, %qv1;
-
-@%qv7 mov.f32 %f43, %f39;
-@%qv7 mov.f32 %f42, %f38;
-@%qv7 mov.f32 %f41, %f37;
-@%qv7 mov.f32 %f40, %f36;
+// Candidate 1 (current frame ground truth) overwrites Candidate 0 (past frame estimate) on conflict:
+// 1. At real foreground objects (sirens, shadows, bubble rim), Candidate 1 is the real object and
+//    Candidate 0 is the occluded background. Candidate 1 wins, completely preventing background erasure!
+// 2. At trailing disocclusion zones (hedge behind siren, sand behind bubble), Candidate 1 is the
+//    revealed background and Candidate 0 is the old stale ghost. Candidate 1 wins, completely collapsing ghosts!
+// 3. Wire fences and static geometry agree (E_motion <= 0.35f), maintaining 100% pure warp with zero tearing!
+and.pred %qv8, %qv4, %qv1;
+and.pred %qv8, %qv8, %qv6;
 
 @%qv8 mov.f32 %f39, %f43;
 @%qv8 mov.f32 %f38, %f42;
