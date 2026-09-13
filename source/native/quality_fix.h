@@ -10,7 +10,7 @@ namespace quality_fix
 // Runs after candidate construction and before the provider's UI composition.
 // Only RGB changes. Auxiliary channels, rejection masks and memory accesses stay intact.
 inline constexpr std::string_view kRegisters = R"ptx(
-.reg .pred %qv<12>;
+.reg .pred %qv<16>;
 .reg .f32 %qf<16>;
 .reg .u16 %qrs<2>;
 )ptx";
@@ -172,9 +172,9 @@ setp.ge.f32 %qv6, %f149, 0f3E4CCCCD;
 or.pred %qv6, %qv6, %qv9;
 and.pred %qv1, %qv1, %qv6;
 
-max.f32 %qf0, %f148, 0f3F59999A;
+max.f32 %qf0, %f148, 0f3F800000;
 min.f32 %qf0, %qf0, 0f3F800000;
-max.f32 %qf1, %f149, 0f3F59999A;
+max.f32 %qf1, %f149, 0f3F800000;
 min.f32 %qf1, %qf1, 0f3F800000;
 
 sub.f32 %qf2, %f125, %f115;
@@ -206,44 +206,37 @@ add.f32 %qf6, %qf6, %qf8;
 setp.gt.f32 %qv4, %qf6, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
 
-// Measure candidate temporal warp deviation from its unwarped reference:
-// E_dev0 = |Warped0 - Unwarped0|
-sub.f32 %qf10, %f125, %f115;
-sub.f32 %qf11, %f126, %f116;
-sub.f32 %qf12, %f127, %f117;
-abs.f32 %qf10, %qf10;
-abs.f32 %qf11, %qf11;
-abs.f32 %qf12, %qf12;
-add.f32 %qf10, %qf10, %qf11;
-add.f32 %qf10, %qf10, %qf12;
+// Bubble outline notch protection:
+// Prevent dark background cables/posts from cutting notches through specular white highlights.
+// 1. Cand 0 is dark background (max(RGB_0) < 0.28f = 0f3E8F5C29) and Cand 1 is specular rim (min(RGB_1) > 0.60f = 0f3F19999A)
+max.f32 %qf10, %f125, %f126;
+max.f32 %qf10, %qf10, %f127;
+setp.lt.f32 %qv2, %qf10, 0f3E8F5C29;
+min.f32 %qf11, %f131, %f132;
+min.f32 %qf11, %qf11, %f133;
+setp.gt.f32 %qv10, %qf11, 0f3F19999A;
+and.pred %qv10, %qv10, %qv2;
+not.pred %qv10, %qv10;
 
-// E_dev1 = |Warped1 - Unwarped1|
-sub.f32 %qf13, %f131, %f119;
-sub.f32 %qf14, %f132, %f120;
-sub.f32 %qf15, %f133, %f121;
-abs.f32 %qf13, %qf13;
-abs.f32 %qf14, %qf14;
-abs.f32 %qf15, %qf15;
-add.f32 %qf13, %qf13, %qf14;
-add.f32 %qf13, %qf13, %qf15;
+// 2. Cand 1 is dark background (max(RGB_1) < 0.28f = 0f3E8F5C29) and Cand 0 is specular rim (min(RGB_0) > 0.60f = 0f3F19999A)
+max.f32 %qf13, %f131, %f132;
+max.f32 %qf13, %qf13, %f133;
+setp.lt.f32 %qv11, %qf13, 0f3E8F5C29;
+min.f32 %qf14, %f125, %f126;
+min.f32 %qf14, %qf14, %f127;
+setp.gt.f32 %qv12, %qf14, 0f3F19999A;
+and.pred %qv11, %qv11, %qv12;
+not.pred %qv11, %qv11;
 
-// Candidate 0 wins if:
-// 1. conf0 > conf1
-// 2. Candidate 1 does NOT match Frame 1 (E_dev1 > 0.35f = 0f3EB33333), confirming Candidate 1 is a ghost!
-// (Protects Candidate 1 when it is a real foreground feature matching Frame 1, like the bubble rim!)
+// Candidate 0 wins if conf0 > conf1 AND NOT (dark cable cutting specular rim)
 setp.gt.f32 %qv7, %f148, %f149;
-setp.gt.f32 %qv2, %qf13, 0f3EB33333;
-and.pred %qv7, %qv7, %qv2;
+and.pred %qv7, %qv7, %qv10;
 and.pred %qv7, %qv7, %qv4;
 and.pred %qv7, %qv7, %qv0;
 
-// Candidate 1 wins if:
-// 1. conf1 > conf0
-// 2. Candidate 0 does NOT match Frame 0 (E_dev0 > 0.35f = 0f3EB33333), confirming Candidate 0 is a ghost!
-// (Protects Candidate 0 when it is a real foreground feature matching Frame 0!)
+// Candidate 1 wins if conf1 > conf0 AND NOT (dark cable cutting specular rim)
 setp.gt.f32 %qv8, %f149, %f148;
-setp.gt.f32 %qv2, %qf10, 0f3EB33333;
-and.pred %qv8, %qv8, %qv2;
+and.pred %qv8, %qv8, %qv11;
 and.pred %qv8, %qv8, %qv4;
 and.pred %qv8, %qv8, %qv1;
 
@@ -283,14 +276,16 @@ inline bool Patch(std::string& ptx, std::string& why)
     if constexpr (scatter_experiment::kMode == 0 || scatter_experiment::kMode == 6 || scatter_experiment::kMode == 7)
     {
         policy = std::string(kPolicyE2);
-        if constexpr (scatter_experiment::kMode == 0 || scatter_experiment::kMode == 7)
+        if constexpr (scatter_experiment::kMode == 6)
         {
-            const std::string from = "0f3F59999A;";
-            const std::string to   = "0f3F800000;";
-            for (size_t pos = 0; (pos = policy.find(from, pos)) != std::string::npos; pos += to.size())
-            {
-                policy.replace(pos, from.size(), to);
-            }
+            const std::string from0 = "max.f32 %qf0, %f148, 0f3F800000;";
+            const std::string to0   = "max.f32 %qf0, %f148, 0f3F59999A;";
+            const std::string from1 = "max.f32 %qf1, %f149, 0f3F800000;";
+            const std::string to1   = "max.f32 %qf1, %f149, 0f3F59999A;";
+            auto p0 = policy.find(from0);
+            if (p0 != std::string::npos) policy.replace(p0, from0.size(), to0);
+            auto p1 = policy.find(from1);
+            if (p1 != std::string::npos) policy.replace(p1, from1.size(), to1);
         }
     }
     else
@@ -316,3 +311,4 @@ inline bool Patch(std::string& ptx, std::string& why)
     return true;
 }
 }
+
