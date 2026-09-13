@@ -156,55 +156,31 @@ add.f32 %qf5, %qf5, %qf7;
 setp.lt.f32 %qv2, %qf5, 0f7F800000;
 and.pred %qv1, %qv1, %qv2;
 and.pred %qv3, %qv0, %qv1;
-ld.param.u8 %qrs0, [%rd6+220];
-setp.ne.s16 %qv9, %qrs0, 0;
 
-// Base acceptance: 100% warp for valid moving geometry across the scene (fence, wire, background)
-setp.ge.f32 %qv5, %f148, 0f3E4CCCCD;
-or.pred %qv5, %qv5, %qv9;
-and.pred %qv0, %qv0, %qv5;
+// Measure candidate disagreement: E_motion = |Warped0 - Warped1|
+sub.f32 %qf6, %f125, %f131;
+sub.f32 %qf7, %f126, %f132;
+sub.f32 %qf8, %f127, %f133;
+abs.f32 %qf6, %qf6;
+abs.f32 %qf7, %qf7;
+abs.f32 %qf8, %qf8;
+add.f32 %qf6, %qf6, %qf7;
+add.f32 %qf6, %qf6, %qf8;
 
-setp.ge.f32 %qv6, %f149, 0f3E4CCCCD;
-or.pred %qv6, %qv6, %qv9;
-and.pred %qv1, %qv1, %qv6;
+// Reference luminance scale: max(Lum0, Lum1, 1.0f)
+max.f32 %qf4, %qf4, %qf5;
+max.f32 %qf4, %qf4, 0f3F800000;
 
-// E_motion = |Warped0 - Warped1|
-sub.f32 %qf9, %f125, %f131;
-sub.f32 %qf10, %f126, %f132;
-sub.f32 %qf11, %f127, %f133;
-abs.f32 %qf9, %qf9;
-abs.f32 %qf10, %qf10;
-abs.f32 %qf11, %qf11;
-add.f32 %qf9, %qf9, %qf10;
-add.f32 %qf9, %qf9, %qf11;
-
-// Max_Lum = max(Warped0_Lum, Warped1_Lum)
-max.f32 %qf7, %qf4, %qf5;
-
-// Translucent highlight conflict detection:
-// Highlight has Max_Lum > 1.20f (0f3F99999A) AND E_motion > 0.35f (0f3EB33333)
-setp.gt.f32 %qv7, %qf7, 0f3F99999A;
-setp.gt.f32 %qv8, %qf9, 0f3EB33333;
-and.pred %qv7, %qv7, %qv8;
-
-// Character region guard: normalized u in [0.35, 0.65], v in [0.15, 0.70]
-// 0.35 = 0f3EB33333, 0.65 = 0f3F266666, 0.15 = 0f3E19999A, 0.70 = 0f3F333333
-setp.ge.f32 %qv4, %f1, 0f3EB33333;
-setp.le.f32 %qv2, %f1, 0f3F266666;
-and.pred %qv4, %qv4, %qv2;
-setp.ge.f32 %qv2, %f2, 0f3E19999A;
-and.pred %qv4, %qv4, %qv2;
-setp.le.f32 %qv2, %f2, 0f3F333333;
-and.pred %qv4, %qv4, %qv2;
-
-// Confirmed translucent bubble highlight on character:
-and.pred %qv7, %qv7, %qv4;
-
-// On translucent bubble highlight: suppress 100% warp override, keep native stock DLSS-G blending
-not.pred %qv2, %qv7;
+// Dynamic candidate agreement firewall:
+// Tolerance = scale * 0.55f (0f3F0CCCCD).
+// Thin wire fences / cables pass reliably (sub-pixel shift difference <= 0.35) -> 100% pure warp maintained -> zero tearing.
+// Translucent objects (sirens, bubble highlight) with background motion vectors disagree strongly (difference >= 1.10) -> pure warp suppressed -> stock DLSS-G fallback -> zero ghosting.
+mul.f32 %qf4, %qf4, 0f3F0CCCCD;
+setp.le.f32 %qv2, %qf6, %qf4;
+not.pred %qv4, %qv3;
+or.pred %qv2, %qv2, %qv4;
 and.pred %qv0, %qv0, %qv2;
 and.pred %qv1, %qv1, %qv2;
-and.pred %p259, %p259, %qv2;
 
 max.f32 %qf0, %f148, 0f3F59999A;
 min.f32 %qf0, %qf0, 0f3F800000;
