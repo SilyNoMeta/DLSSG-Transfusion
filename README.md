@@ -7,9 +7,19 @@ Dynamic defaults to a 4x ceiling. Its UI toggle allows experimental 5x and 6x.
 UI recomposition is requested only when matching HUDless and UI buffers are tagged.
 The panel reports rendered FPS and total DLSS output FPS.
 
-Version 1.4.0 introduces the **DLSS-G Quality Fix (`qualityValidWarp`)**, unlocks native HUDless
+Version **1.4.1** consolidates all proxy DLLs into a single universal `DLSSG-Transfusion.dll`,
+adds an in-game multiplier overlay, and improves shadow/translucent quality at high speed.
+
+Version **1.4.0** introduced the **DLSS-G Quality Fix (`qualityValidWarp`)**, unlocked native HUDless
 UI Recomposition (UIR) for games tagging separate UI buffers (eliminating tearing with zero HUD ghosting),
-provides rock-solid HUD protection for single-surface pipelines, and adds `dinput8.dll` proxy support.
+provided rock-solid HUD protection for single-surface pipelines, and added `dinput8.dll` proxy support.
+
+### What's New in Version 1.4.1
+- **Universal Proxy DLL**: All proxy targets (`version.dll`, `dinput8.dll`, `dxgi.dll`, `winmm.dll`, `.asi`) merged into `DLSSG-Transfusion.dll`. Rename it to whichever proxy name your game requires; the DLL auto-detects its role from its filename at runtime.
+- **In-Game Multiplier Overlay**: Lightweight DXGI Present-hooked HUD showing active multiplier and frame generation state in real time. Toggle with `Ctrl + Alt + O` (off by default).
+- **Quality Fix - Shadow Temporal Interpolation**: Per-frame fractional-timestamp shadow positions eliminate shadow lag and snap-teleport artifacts at high speed.
+- **Quality Fix - Chromatic Conflict Firewall**: Siren lights and translucent mesh pixels (chromatic conflict) fall back to stock DLSS-G dissolve instead of forcing corrupt warp, eliminating double-dome tearing on rotating lights and bubble helmets.
+- **Quality Fix - Relaxed Shadow Veto Threshold (12%)**: Fast-moving outdoor shadows no longer disintegrate under ambient lighting shifts.
 
 ### What's New in Version 1.4.0
 - **DLSS-G Quality Fix (`qualityValidWarp=true`)**:
@@ -72,25 +82,21 @@ latency, frozen presentation, black screens, or crashes. On 8GB GPUs, 2x-3x (or
 ## Universal Multi-Game Proxy Injection
 
 The mod can be used in **any game** with NVIDIA DLSS Frame Generation and Streamline without requiring Cyber Engine Tweaks:
-1. Copy `DLSSG-Transfusion.dll` from `dist/` and rename that copy to one of:
+1. Copy `DLSSG-Transfusion.dll` from `dist/` and rename it to match your game's proxy:
    - `version.dll` (Recommended for most modern games and Unreal Engine 4/5)
    - `dinput8.dll` (Recommended for games utilizing DirectInput8)
    - `dxgi.dll` (For games initializing graphics early)
    - `winmm.dll` (Alternative proxy)
-   The pre-named DLLs in `dist/` are exact-ordinal compatibility fallbacks. Use
-   one only if the primary renameable DLL does not load in a particular game.
-   - `DLSSG-Transfusion.asi` (For games with ASI loaders)
-2. Copy the DLL into the game executable directory.
+   - `*.asi` (For games with ASI loaders - rename to any `.asi` filename)
+   The DLL auto-detects its proxy role from its filename at runtime.
+2. Copy the DLL and `DLSSG-Transfusion.json` into the game executable directory.
 3. Use in-game hotkeys to switch multipliers on the fly:
    - `Ctrl + Alt + 2..6`: Fixed 2x through 6x multiplier
    - `Ctrl + Alt + PageUp` / `PageDown`: Increment / Decrement multiplier (Fixed Mode)
-   - `Ctrl + Alt + O`: Toggle the small native in-game multiplier indicator (off
-     by default). The
-     indicator shows Streamline's actual presented-frame count, so dynamic MFG and
-     multiplier changes made by other controllers are reflected automatically.
    - `Ctrl + Alt + D`: Toggle between Fixed Mode and Dynamic Mode
    - `Ctrl + Alt + Up` / `+`: Increase Dynamic MFG target FPS (+5 FPS; hold Shift for 1 FPS fine adjustment)
    - `Ctrl + Alt + Down` / `-`: Decrease Dynamic MFG target FPS (-5 FPS; hold Shift for 1 FPS fine adjustment)
+   - `Ctrl + Alt + O`: Toggle the in-game multiplier/state overlay (off by default)
 4. Detailed diagnostic logs are written directly to `DLSSG-Transfusion.log` in the game directory.
 5. See [INJECTION.md](INJECTION.md) for full instructions and troubleshooting.
 
@@ -115,7 +121,7 @@ gate, preventing same-version DLSS-family siblings from being scanned as the
 Frame Generation provider. It patches only mapped process memory, never DLLs on
 disk, and does not assume NVIDIA cache paths.
 
-The D157 (v1.0) fix targets Ada’s midpoint compaction bug: at higher multipliers, generated samples collapse toward the middle of the frame interval instead of occupying their requested temporal positions, producing near duplicate frames. It backports the corrected slot-9 temporal program used by Blackwell in process memory so each generated sample is evaluated at its own evenly spaced position between rendered frames. If the active adapter, provider version, or layout cannot be verified, the patch fails closed to native 2x.
+The D157 (v1.0) fix targets Ada's midpoint compaction bug: at higher multipliers, generated samples collapse toward the middle of the frame interval instead of occupying their requested temporal positions, producing near duplicate frames. It backports the corrected slot-9 temporal program used by Blackwell in process memory so each generated sample is evaluated at its own evenly spaced position between rendered frames. If the active adapter, provider version, or layout cannot be verified, the patch fails closed to native 2x.
 
 The bridge becomes ready only after the active DLSS G wrapper and loaded NGX
 module are verified and patched. It then adjusts `slDLSSGSetOptions` and reads
@@ -135,13 +141,20 @@ cmake -S .\source\native -B .\build -G "Visual Studio 17 2022" -A x64 `
 cmake --build .\build --config Release --parallel
 ```
 
-The native build writes the primary renameable `DLSSG-Transfusion.dll`, the ASI,
-and exact-export fallback proxy DLLs to `build\dist\`. The CET UI and its
-FPS/status client are tracked at
-`bin\x64\plugins\cyber_engine_tweaks\mods\DLSSG-Transfusion\init.lua`. Breakpoint and
-deep-kernel research diagnostics are disabled in the normal build.
+The native build writes `DLSSG-Transfusion.dll` (universal proxy) to `build\dist\`.
+Rename the DLL to your target proxy name before placing it in the game directory.
+Breakpoint and deep-kernel research diagnostics are disabled in the normal build.
 
 Logs are written to the temporary directory and include the process ID.
+
+## Credits
+
+- **[dashdogy/RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock)** - original mod this project is based on
+- **[mavismmg/MFGAdaUnlock-RenoDx](https://github.com/mavismmg/MFGAdaUnlock-RenoDx)** - architecture gate bypass and foundational fixes
+
+## Disclaimer
+
+Independent project, not affiliated with or endorsed by NVIDIA. This tool injects directly into active game memory, meaning you use it at your own risk. Expect multiplayer anti-cheat systems to flag or block it. Visual quality and performance on officially unsupported hardware may vary and are up to you to evaluate.
 
 ## License
 
