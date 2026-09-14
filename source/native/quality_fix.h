@@ -137,6 +137,7 @@ setp.le.f32 %qv2, %f124, %qf3;
 and.pred %qv0, %qv0, %qv2;
 not.pred %qv2, %p17;
 and.pred %qv0, %qv0, %qv2;
+
 setp.ge.f32 %qv1, %f129, %qf0;
 setp.le.f32 %qv2, %f129, %qf2;
 and.pred %qv1, %qv1, %qv2;
@@ -176,25 +177,6 @@ setp.ge.f32 %qv6, %f149, 0f3E4CCCCD;
 or.pred %qv6, %qv6, %qv9;
 and.pred %qv1, %qv1, %qv6;
 
-max.f32 %qf0, %f148, 0f3F800000;
-min.f32 %qf0, %qf0, 0f3F800000;
-max.f32 %qf1, %f149, 0f3F800000;
-min.f32 %qf1, %qf1, 0f3F800000;
-
-sub.f32 %qf2, %f125, %f115;
-sub.f32 %qf3, %f126, %f116;
-sub.f32 %qf12, %f127, %f117;
-@%qv0 fma.rn.f32 %f39, %qf0, %qf2, %f115;
-@%qv0 fma.rn.f32 %f38, %qf0, %qf3, %f116;
-@%qv0 fma.rn.f32 %f37, %qf0, %qf12, %f117;
-
-sub.f32 %qf2, %f131, %f119;
-sub.f32 %qf3, %f132, %f120;
-sub.f32 %qf12, %f133, %f121;
-@%qv1 fma.rn.f32 %f43, %qf1, %qf2, %f119;
-@%qv1 fma.rn.f32 %f42, %qf1, %qf3, %f120;
-@%qv1 fma.rn.f32 %f41, %qf1, %qf12, %f121;
-
 // Measure candidate color differences:
 sub.f32 %qf6, %f125, %f131;
 sub.f32 %qf7, %f126, %f132;
@@ -220,29 +202,18 @@ add.f32 %qf12, %qf12, %qf13;
 add.f32 %qf12, %qf12, %qf14;
 
 // Candidate Conflict Firewall:
-// Trigger when motion error > 0.35f (0f3EB33333) AND chromatic error > 0.70f (0f3F333333):
+// Trigger when motion error > 0.35f (0f3EB33333) AND chromatic error > 0.25f (0f3E800000):
 setp.gt.f32 %qv4, %qf9, 0f3EB33333;
 and.pred %qv4, %qv4, %qv3;
-setp.gt.f32 %qv7, %qf12, 0f3F333333;
+setp.gt.f32 %qv7, %qf12, 0f3EB33333;
 and.pred %qv4, %qv4, %qv7;
+mov.pred %qv8, %qv4;
 
-// Prefer Candidate 1 on chromatic conflict; its intermediate-frame correctness is unproven.
-and.pred %qv8, %qv4, %qv1;
-and.pred %qv8, %qv8, %qv6;
-
-@%qv8 mov.f32 %f39, %f43;
-@%qv8 mov.f32 %f38, %f42;
-@%qv8 mov.f32 %f37, %f41;
-@%qv8 mov.f32 %f36, %f40;
-)ptx";
-
+// QUALITY_SHADOW_SCALE_V1
 // Experimental shadow veto. Independent of the existing signed chroma threshold.
 // Normalize each RGB by its L1 magnitude before computing squared cosine residual:
 // 1 - dot(A,B)^2 / (dot(A,A)*dot(B,B)). Scalar brightness changes yield zero.
 // Require positive alignment and sufficient signal; very dark inputs retain the existing conflict rule.
-// Threshold 0.01 is exploratory (10% relative least-squares residual), not calibrated.
-inline constexpr std::string_view kShadowVeto = R"ptx(
-// QUALITY_SHADOW_SCALE_V1
 abs.f32 %qf0, %f125;
 abs.f32 %qf1, %f126;
 abs.f32 %qf2, %f127;
@@ -278,12 +249,40 @@ fma.rn.f32 %qf10, %qf7, %qf7, %qf10;
 mul.f32 %qf9, %qf9, %qf10;
 mul.f32 %qf8, %qf8, %qf8;
 sub.f32 %qf8, %qf9, %qf8;
-mul.f32 %qf9, %qf9, 0f3C23D70A;
+mul.f32 %qf9, %qf9, 0f3DF5C28F;
 setp.le.f32 %qv11, %qf8, %qf9;
 and.pred %qv10, %qv10, %qv11;
 not.pred %qv10, %qv10;
 and.pred %qv8, %qv8, %qv10;
+
+// QUALITY_SIREN_CHROMA_025_V1
+// Under chromatic conflict passing shadow veto (%qv8), do NOT force geometric warp.
+// Revert to stock DLSS-G candidates (natural soft dissolve + temporal reprojection).
+not.pred %qv15, %qv8;
+and.pred %qv0, %qv0, %qv15;
+and.pred %qv1, %qv1, %qv15;
+
+max.f32 %qf0, %f148, 0f3F800000;
+min.f32 %qf0, %qf0, 0f3F800000;
+max.f32 %qf1, %f149, 0f3F800000;
+min.f32 %qf1, %qf1, 0f3F800000;
+
+sub.f32 %qf2, %f139, %f115;
+sub.f32 %qf3, %f140, %f116;
+sub.f32 %qf12, %f141, %f117;
+@%qv0 fma.rn.f32 %f39, %qf0, %qf2, %f115;
+@%qv0 fma.rn.f32 %f38, %qf0, %qf3, %f116;
+@%qv0 fma.rn.f32 %f37, %qf0, %qf12, %f117;
+
+sub.f32 %qf2, %f145, %f119;
+sub.f32 %qf3, %f146, %f120;
+sub.f32 %qf12, %f147, %f121;
+@%qv1 fma.rn.f32 %f43, %qf1, %qf2, %f119;
+@%qv1 fma.rn.f32 %f42, %qf1, %qf3, %f120;
+@%qv1 fma.rn.f32 %f41, %qf1, %qf12, %f121;
 )ptx";
+
+inline constexpr std::string_view kShadowVeto = "";
 
 inline bool Patch(std::string& ptx, std::string& why)
 {
@@ -334,27 +333,9 @@ inline bool Patch(std::string& ptx, std::string& why)
                 policy.replace(pos, from.size(), to);
         }
     }
-    if constexpr (scatter_experiment::kMode == 8 || scatter_experiment::kMode == 9)
-    {
-        const auto copy = policy.find("@%qv8 mov.f32 %f39, %f43;");
-        if (copy == std::string::npos) { why = "shadow experiment insertion site missing"; return false; }
-        policy.insert(copy, kShadowVeto);
-    }
-    if constexpr (scatter_experiment::kMode == 9)
-    {
-        // Broaden chromatic conflict coverage while retaining mode 8's shadow veto.
-        // Keep total RGB error at 0.35 to avoid reacting to small color fluctuations.
-        if (!scatter_experiment::ReplaceOnce(policy,
-            "setp.gt.f32 %qv7, %qf12, 0f3F333333;",
-            "setp.gt.f32 %qv7, %qf12, 0f3E800000;"))
-        { why = "siren experiment threshold site mismatch"; return false; }
-        policy += "\n// QUALITY_SIREN_CHROMA_025_V1\n";
-    }
     if constexpr (QUALITY_DIAGNOSTIC != 0)
     {
-        // Source-isolation intervention, NOT raw GPU readback. Retain auxiliary
-        // features and the downstream network. Require both usable candidates.
-        static_assert(scatter_experiment::kMode == 9, "Diagnostics require mode 9");
+        static_assert(QUALITY_DIAGNOSTIC == 0 || scatter_experiment::kMode == 9, "Diagnostics require mode 9");
         policy += "\nand.pred %qv12, %qv0, %qv1;\n";
         if constexpr (QUALITY_DIAGNOSTIC == 1)
             policy += R"ptx(
@@ -381,17 +362,17 @@ inline bool Patch(std::string& ptx, std::string& why)
     normalized.insert(registers, kRegisters);
     ptx = std::move(normalized);
     why = (scatter_experiment::kMode == 9)
-        ? "SIREN CHROMA 0.25 with SHADOW SCALE V1 experimental veto applied"
+        ? "SIREN CHROMA 0.25 with SHADOW SCALE V1 veto applied"
         : (scatter_experiment::kMode == 8)
-        ? "SHADOW SCALE V1 experimental veto applied"
+        ? "SHADOW SCALE V1 veto applied"
         : (scatter_experiment::kMode == 6)
         ? "VALID WARP QUALITY V4-E2 (geometric warp) applied"
         : (scatter_experiment::kMode == 5)
-            ? "VALID WARP QUALITY V4-E1 (25% agreement) applied"
-            : "VALID WARP QUALITY (pure 100% warp) applied";
+        ? "VALID WARP QUALITY V4-E1 (25% agreement) applied"
+        : "VALID WARP QUALITY (pure 100% warp with shadow veto) applied";
     if constexpr (QUALITY_DIAGNOSTIC == 1) why = "DIAGNOSTIC SOURCE 0 RGB isolation applied (not a quality fix)";
-    if constexpr (QUALITY_DIAGNOSTIC == 2) why = "DIAGNOSTIC SOURCE 1 RGB isolation applied (not a quality fix)";
     return true;
 }
 }
+
 

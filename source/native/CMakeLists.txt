@@ -36,11 +36,37 @@ set(COMMON_SOURCES
     patcher.cpp
     midpoint_fix.cpp
     dlssg_provider_policy.cpp
+    multiplier_overlay.cpp
     proxy.cpp
     proxy_thunks.asm
 )
 
 set(DETOURS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/detours")
+
+# The primary distribution binary follows OptiScaler's proven model: one PE
+# contains the union of all named proxy exports and selects the backing system
+# DLL from its filename at runtime. Exact-ordinal targets remain below as
+# compatibility fallbacks for the uncommon ordinal-import case.
+set(UNIVERSAL_DEF "${CMAKE_CURRENT_BINARY_DIR}/DLSSG-Transfusion-universal.def")
+file(WRITE "${UNIVERSAL_DEF}" "LIBRARY DLSSG-Transfusion\nEXPORTS\n")
+set(UNIVERSAL_EXPORTS)
+foreach(PROXY_DEF version.def winmm.def dxgi.def dinput8.def)
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/${PROXY_DEF}" DEF_LINES)
+    foreach(DEF_LINE IN LISTS DEF_LINES)
+        string(STRIP "${DEF_LINE}" DEF_LINE)
+        if(DEF_LINE STREQUAL "" OR DEF_LINE MATCHES "^(LIBRARY|EXPORTS)" OR DEF_LINE MATCHES "NONAME")
+            continue()
+        endif()
+        string(REGEX REPLACE "[ \t]+@[0-9]+.*$" "" DEF_LINE "${DEF_LINE}")
+        string(REGEX MATCH "^[^ =]+" EXPORT_NAME "${DEF_LINE}")
+        list(FIND UNIVERSAL_EXPORTS "${EXPORT_NAME}" DUPLICATE_INDEX)
+        if(NOT DUPLICATE_INDEX EQUAL -1)
+            message(FATAL_ERROR "Duplicate universal proxy export: ${EXPORT_NAME}")
+        endif()
+        list(APPEND UNIVERSAL_EXPORTS "${EXPORT_NAME}")
+        file(APPEND "${UNIVERSAL_DEF}" "    ${DEF_LINE}\n")
+    endforeach()
+endforeach()
 
 function(setup_mod_target TARGET_NAME OUTPUT_BASENAME DEF_FILE EXTENSION)
     set(RC_INTERNAL_NAME "${OUTPUT_BASENAME}${EXTENSION}")
@@ -54,9 +80,13 @@ function(setup_mod_target TARGET_NAME OUTPUT_BASENAME DEF_FILE EXTENSION)
     target_link_options(${TARGET_NAME} PRIVATE /DEBUG:FULL /OPT:REF /OPT:ICF)
     target_compile_definitions(${TARGET_NAME} PRIVATE QUALITY_DIAGNOSTIC=${QUALITY_DIAGNOSTIC} SCATTER_EXPERIMENT=${SCATTER_EXPERIMENT} UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_include_directories(${TARGET_NAME} PRIVATE "${STREAMLINE_ROOT}/include" "${DETOURS_DIR}")
-    target_link_libraries(${TARGET_NAME} PRIVATE bcrypt version user32 "${DETOURS_DIR}/detours.lib")
+    target_link_libraries(${TARGET_NAME} PRIVATE bcrypt version user32 d3d12 dxgi d3dcompiler "${DETOURS_DIR}/detours.lib")
     if(DEF_FILE)
-        target_link_options(${TARGET_NAME} PRIVATE "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/${DEF_FILE}")
+        if(IS_ABSOLUTE "${DEF_FILE}")
+            target_link_options(${TARGET_NAME} PRIVATE "/DEF:${DEF_FILE}")
+        else()
+            target_link_options(${TARGET_NAME} PRIVATE "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/${DEF_FILE}")
+        endif()
     endif()
     set_target_properties(${TARGET_NAME} PROPERTIES
         PREFIX ""
@@ -70,6 +100,10 @@ function(setup_mod_target TARGET_NAME OUTPUT_BASENAME DEF_FILE EXTENSION)
     )
 endfunction()
 
+# Primary renameable distribution DLL (named exports).
+setup_mod_target(Transfusion_universal "DLSSG-Transfusion" "${UNIVERSAL_DEF}" ".dll")
+
+# Exact-export compatibility fallbacks.
 # 1. version.dll proxy target
 setup_mod_target(Transfusion_version "version" "version.def" ".dll")
 

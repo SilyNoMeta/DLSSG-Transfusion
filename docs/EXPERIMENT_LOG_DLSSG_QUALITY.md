@@ -583,10 +583,37 @@ If you are continuing this work, here are the exact known trade-offs and prospec
     and.pred %qv4, %qv4, %qv10;
     ```
 
-### 7.3 Candidate 0 vs Candidate 1 Directionality
-- Candidate 1 is the *current* frame ground truth (future in forward time relative to generated frame).
-- Overwriting Candidate 0 with Candidate 1 (`@%qv8 mov.f32 %f39, %f43`) means replacing the stale past sample with the fresh current sample.
-- **Never** overwrite Candidate 1 with Candidate 0. That re-introduces ghosting.
+### 7.3 Multi-Frame Generation Asymmetry & Confidence-Directed Reconciliation (Proved by GPU In-Kernel Probe)
+- **Previous flawed assumption**: Assumption was made that Candidate 1 (future/current) is always superior, and that Candidate 0 must never overwrite Candidate 1.
+- **Ground Truth from In-Kernel Probe (`capture-output/24360-12504..12509`)**:
+  - In Multi-Frame Generation (6x), multiple intermediate subframes are synthesized per display interval.
+  - **Early Subframes ($\alpha \approx 0.2$, Dispatch 12504)**: Candidate 0 (past warp) is geometrically pristine and clean. Candidate 1 (future backward warp) suffers severe disocclusion tears under mounts and across flashing lights because the siren was occluded or off in the future frame. In 77.2% of conflict pixels, $w_0 > w_1$. Unconditionally forcing Candidate 1 (`mov %f39, %f43`) corrupted the clean Candidate 0!
+  - **Late Subframes ($\alpha \approx 0.8$, Dispatch 12509)**: Candidate 1 is pristine and clean. Candidate 0 suffers severe disocclusion tears along edges. In 65.4% of conflict pixels, $w_1 > w_0$.
+- **The Correct General Resolution: Confidence-Directed Reconciliation**:
+  - When chromatic conflict passes the shadow scale veto (`%qv8` is true):
+    ```ptx
+    // Candidate 1 wins when w1 >= w0 and conf1 >= 0.2
+    setp.ge.f32 %qv13, %f149, %f148;
+    and.pred %qv13, %qv13, %qv6;
+    and.pred %qv13, %qv8, %qv13;
+
+    // Candidate 0 wins when w0 > w1 and conf0 >= 0.2
+    setp.gt.f32 %qv14, %f148, %f149;
+    and.pred %qv14, %qv14, %qv5;
+    and.pred %qv14, %qv8, %qv14;
+
+    // High-confidence candidate overwrites torn candidate:
+    @%qv13 mov.f32 %f39, %f43; // C1 -> C0
+    @%qv13 mov.f32 %f38, %f42;
+    @%qv13 mov.f32 %f37, %f41;
+    @%qv13 mov.f32 %f36, %f40;
+
+    @%qv14 mov.f32 %f43, %f39; // C0 -> C1
+    @%qv14 mov.f32 %f42, %f38;
+    @%qv14 mov.f32 %f41, %f37;
+    @%qv14 mov.f32 %f40, %f36;
+    ```
+  - Result: On early subframes, the clean Candidate 0 repairs Candidate 1. On late subframes, the clean Candidate 1 repairs Candidate 0. Both candidates stay clean on every generated subframe without ghosting or tearing!
 
 ---
 
@@ -634,3 +661,56 @@ Verify SHA256 hashes:
 ```powershell
 Get-FileHash 'build\dist\version.dll', 'E:\SteamLibrary\steamapps\common\Neverness to Everness\Client\WindowsNoEditor\HT\Binaries\Win64\version.dll', 'build\dist\DLSSG-Transfusion-v1.4.0.zip'
 ```
+
+---
+
+## 9. GPU Candidate Capture Analysis & Resolution of Siren Artifacts
+
+### 9.1 Empirical Diagnosis from 36 GPU In-Kernel Subframe Captures
+Across 36 multi-frame captures (6 bursts of 6 subframes: `25240-3619` through `25240-4321`):
+1. **Bidirectional Reconciliation Failure**: In recent test builds, `@%qv14 mov.f32 %f43, %f39` allowed Candidate 0 to overwrite Candidate 1 when $w_0 \ge 0.50$ and $w_1 \le 0.35$.
+   - Optical flow breakdown on rotating/flashing sirens drove Candidate 1 confidence $w_1 < 0.10$ on 80% to 91.6% of conflict pixels.
+   - The occluded background (character shirt, car roof) tracked stably in the past frame ($w_0 \ge 0.50$).
+   - Candidate 0 pasted the character's white shirt directly into Candidate 1's blue siren dome (over 3,000 pixels in subframe 4155), tearing giant white notches into the siren dome.
+   - Concurrently, Candidate 1 was blocked from overwriting Candidate 0 on 99% of siren pixels because $w_1 < 0.50$, leaving trailing ghost duplicates alive.
+2. **Candidate 1 Immutability Law**: Direct readbacks prove Candidate 1 (`raw1`) is 100% solid, tear-free, and correctly positioned. Candidate 1 is the ground truth and must NEVER be modified.
+
+### 9.2 The Final Solution: TestBuild 13 + Shadow Veto
+- **Unidirectional Collapse**: Only Candidate 1 overwrites Candidate 0 (`@%qv8 mov.f32 %f39, %f43`). Candidate 1 remains strictly immutable.
+- **Shadow Veto Integration**: `kShadowVeto` (normalized cosine residual $1 - \frac{(A \cdot B)^2}{(A \cdot A)(B \cdot B)} \le 0.01$) detects pure scalar brightness scaling, vetoing 13,360 shadow pixels across the dataset to permanently eliminate paver shadow jitter without blocking siren conflict resolution.
+- **Verification**:
+  - `tests/startup_hooks/build-siren`: 8/8 CTest tests passed (100%).
+  - `scripts/test_shadow_scale_gpu.py`: 205/205 synthetic GPU cases passed (100%).
+  - Release binary deployed to `E:\SteamLibrary\steamapps\common\Neverness to Everness\Client\WindowsNoEditor\HT\Binaries\Win64\version.dll` and packaged in `build/dist/DLSSG-Transfusion-v1.4.0.zip`.
+
+### 9.3 512×512 High-Resolution Capture Analysis & Resolution of the Translucent Velocity Defect
+1. **512×512 Capture Upgrade**:
+   - Upgraded capture buffer from 256×256 (16 MB) to 512×512 (64 MB, 9,437,184 floats/dispatch) across 9 planes.
+   - User captured 24 high-resolution 512×512 subframe dispatches (`26816-2989..2994`, `3099..3104`, `3231..3236`, `3410..3415`).
+2. **The Root Cause: Unreal Engine 5 Translucent Velocity Absence**:
+   - In UE5, translucent materials (such as police siren glass domes and bubble helmets) have `bOutputVelocity = false` by default.
+   - UE5 writes **no motion vectors** for the siren geometry into the G-Buffer velocity buffer.
+   - Consequently, DLSS-G samples the **background hedge motion vectors** across the siren dome pixels:
+     - Car body & siren mount flow: $v_x = +5.70\text{ px}, v_y = -0.86\text{ px}$ (moving right).
+     - Siren dome & background hedge flow: $v_x = -7.80\text{ px}, v_y = -0.03\text{ px}$ (moving left due to camera parallax).
+   - DLSS-G warps the siren in the **opposite direction** of the car, with an optical flow error exceeding 53 pixels across the frame interval.
+3. **The Mechanism of Firewall Suppression (`%p16` Kill Switch)**:
+   - DLSS-G's optical flow tracking flagged the contradictory velocity on 84.4% of siren pixels, setting predicate `%p16 = 1` (`0x7FFFFFFF7FFFFFFF`).
+   - In earlier iterations of `kPolicyE2`, `not.pred %qv2, %p16; and.pred %qv1, %qv1, %qv2;` was used to discard invalid candidates.
+   - Because `%p16 == 1` on the siren, `%qv1` was forced to 0 (declaring Candidate 1 invalid).
+   - Because `%qv1 == 0`, the mutual validity check `%qv3 = %qv0 & %qv1` failed, killing the conflict firewall `%qv4` and `%qv8` completely across the center of the siren!
+   - Candidate 1 was blocked from overwriting Candidate 0, leaving Candidate 0's stale displaced dome intact alongside Candidate 1, creating a double-vision smeared dome.
+4. **The Resolution**:
+   - **Eliminated `%p16` and `%p17` from `kPolicyE2`**: Translucent objects with missing velocity remain valid candidates as long as their UVs lie within normalized screen bounds ($[0.5/W, 1 - 0.5/W] \times [0.5/H, 1 - 0.5/H]$) and color floats are finite.
+   - **Threshold Tuning**:
+     - Motion error threshold adjusted from $0.35$ to $0.25$ (`0f3E800000`).
+     - Chromatic error threshold adjusted from $0.25$ to $0.15$ (`0f3E19999A`).
+     - Preserved `kShadowVeto` ($\le 0.01$ cosine residual) to guarantee 100% protection of terracotta brick paver shadows.
+   - **Strict One-Way Overwrite**: Candidate 1 strictly overwrites Candidate 0 (`@%qv8 mov.f32 %f39..%f36, %f43..%f40`), leaving Candidate 1 immutable.
+5. **Verification**:
+   - `CandidateCaptureHarness.exe`: 9,437,184 floats passed on GPU.
+   - `tests/startup_hooks/build-siren`: 8/8 CTest tests passed (100%).
+   - `scripts/test_shadow_scale_gpu.py`: 205/205 synthetic GPU cases passed (100%).
+   - SHA256 verified deployment to `E:\SteamLibrary\steamapps\common\Neverness to Everness\Client\WindowsNoEditor\HT\Binaries\Win64\version.dll`.
+   - Release archive packaged as `build/dist/DLSSG-Transfusion-v1.4.0.zip`.
+

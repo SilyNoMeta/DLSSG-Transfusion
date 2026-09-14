@@ -23,3 +23,7 @@ tests/live_control_harness/build/
 /build-capture/
 /capture-output/
 /tests/startup_hooks/build-capture/
+
+/capture-review/
+/scratch/
+scripts/__pycache__/

@@ -7,7 +7,9 @@
 It features:
 - **Blackwell Kernel Transfusion**: Backports Blackwell `sm_120` branchless scatter math to Ada `sm_89` at runtime.
 - **Zero Configuration / Standalone Mode**: Works completely out-of-the-box in any game without Cyber Engine Tweaks (CET).
-- **Proxy DLL Injection**: Pre-built proxies for `version.dll`, `dxgi.dll`, `winmm.dll`, and `DLSSG-Transfusion.asi`.
+- **Proxy DLL Injection**: One primary `DLSSG-Transfusion.dll` can be renamed to
+  `version.dll`, `dxgi.dll`, `winmm.dll`, or `dinput8.dll`; exact-export fallback
+  binaries and `DLSSG-Transfusion.asi` are also provided.
 - **NVIDIA OTA Override**: Forces `slInit` to enable `eAllowOTA | eLoadDownloadedPlugins` so games can load newer/updated models from driver caches or local directories.
 - **Dynamic Multiplier Hotkeys**: Switch multipliers live on the fly during gameplay using hotkeys.
 - **Diagnostic & Benchmark Telemetry**: Writes runtime status directly to `DLSSG-Transfusion.log` and per-frame CSV data to `DLSSG-Transfusion_perf.csv`.
@@ -16,7 +18,9 @@ It features:
 
 ## 1. Choosing a Proxy DLL
 
-Copy **one** of the following DLLs from the `dist/` folder directly into your game's executable directory (where the game `.exe` resides):
+Copy `DLSSG-Transfusion.dll` from `dist/`, rename the copy to one of the proxy
+names below, and place it in the game executable directory. The already named
+DLLs are exact-ordinal fallbacks for games that do not accept the primary binary.
 
 | File | Use Case & Compatibility | Recommended For |
 |---|---|---|
@@ -60,6 +64,7 @@ Example `DLSSG-Transfusion.json`:
 {
   "mode": "fixed",
   "multiplier": 4,
+  "showOverlay": false,
   "dynamicTargetFrameRate": 120,
   "dynamicExperimental56": false
 }

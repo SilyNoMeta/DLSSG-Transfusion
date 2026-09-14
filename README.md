@@ -72,16 +72,22 @@ latency, frozen presentation, black screens, or crashes. On 8GB GPUs, 2x-3x (or
 ## Universal Multi-Game Proxy Injection
 
 The mod can be used in **any game** with NVIDIA DLSS Frame Generation and Streamline without requiring Cyber Engine Tweaks:
-1. Choose one proxy DLL from `dist/`:
+1. Copy `DLSSG-Transfusion.dll` from `dist/` and rename that copy to one of:
    - `version.dll` (Recommended for most modern games and Unreal Engine 4/5)
    - `dinput8.dll` (Recommended for games utilizing DirectInput8)
    - `dxgi.dll` (For games initializing graphics early)
    - `winmm.dll` (Alternative proxy)
+   The pre-named DLLs in `dist/` are exact-ordinal compatibility fallbacks. Use
+   one only if the primary renameable DLL does not load in a particular game.
    - `DLSSG-Transfusion.asi` (For games with ASI loaders)
 2. Copy the DLL into the game executable directory.
 3. Use in-game hotkeys to switch multipliers on the fly:
    - `Ctrl + Alt + 2..6`: Fixed 2x through 6x multiplier
    - `Ctrl + Alt + PageUp` / `PageDown`: Increment / Decrement multiplier (Fixed Mode)
+   - `Ctrl + Alt + O`: Toggle the small native in-game multiplier indicator (off
+     by default). The
+     indicator shows Streamline's actual presented-frame count, so dynamic MFG and
+     multiplier changes made by other controllers are reflected automatically.
    - `Ctrl + Alt + D`: Toggle between Fixed Mode and Dynamic Mode
    - `Ctrl + Alt + Up` / `+`: Increase Dynamic MFG target FPS (+5 FPS; hold Shift for 1 FPS fine adjustment)
    - `Ctrl + Alt + Down` / `-`: Decrease Dynamic MFG target FPS (-5 FPS; hold Shift for 1 FPS fine adjustment)
@@ -129,7 +135,8 @@ cmake -S .\source\native -B .\build -G "Visual Studio 17 2022" -A x64 `
 cmake --build .\build --config Release --parallel
 ```
 
-The native build writes `build\Release\DLSSG-Transfusion.asi` and proxy DLLs to `build\dist\`. The CET UI and its
+The native build writes the primary renameable `DLSSG-Transfusion.dll`, the ASI,
+and exact-export fallback proxy DLLs to `build\dist\`. The CET UI and its
 FPS/status client are tracked at
 `bin\x64\plugins\cyber_engine_tweaks\mods\DLSSG-Transfusion\init.lua`. Breakpoint and
 deep-kernel research diagnostics are disabled in the normal build.

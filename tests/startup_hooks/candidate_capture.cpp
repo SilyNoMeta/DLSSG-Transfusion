@@ -26,7 +26,7 @@ int main() {
     if (FAILED(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,allocator.Get(),nullptr,IID_PPV_ARGS(&list)))) return 6;
     Job job;
     if (!CreateJob(device.Get(),job)) { std::cerr << "CreateJob failed\n"; return 7; }
-    if (!Record(list.Get(),shader,job,1,256,1)) { std::cerr << "Record failed\n"; return 8; }
+    if (!Record(list.Get(),shader,job,side/256,side,1)) { std::cerr << "Record failed\n"; return 8; }
     if (FAILED(list->Close())) return 9;
     ID3D12CommandList* commands[] = {list.Get()};
     queue->ExecuteCommandLists(1,commands);

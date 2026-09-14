@@ -9,7 +9,9 @@ enum class ProxyType
     Version,
     Winmm,
     Dxgi,
-    Dinput8
+    Dinput8,
+    Asi,
+    Unsupported
 };
 
 ProxyType Initialize(HINSTANCE instance);

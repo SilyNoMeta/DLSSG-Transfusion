@@ -20,7 +20,7 @@
 
 namespace candidate_capture {
 using Microsoft::WRL::ComPtr;
-inline constexpr UINT side = 256, planes = 9, maxJobs = 6;
+inline constexpr UINT side = 512, planes = 9, maxJobs = 6;
 using Query = void*(__cdecl*)(unsigned);
 using CreateShader = int(__cdecl*)(ID3D12Device*, const void*, UINT, UINT, UINT, UINT, const char*, void**);
 using LaunchShader = int(__cdecl*)(ID3D12GraphicsCommandList*, void*, UINT, UINT, UINT, const void*, UINT);
@@ -78,7 +78,7 @@ inline bool CreateJob(ID3D12Device* device, Job& job) {
     if (FAILED(device->CreateCommittedResource(&gpu,D3D12_HEAP_FLAG_NONE,&desc,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&job.atlas)))) return false;
     device->GetCopyableFootprints(&desc,0,1,0,&job.footprint,nullptr,nullptr,&job.bytes);
-    if (!job.bytes || job.bytes > 16ull*1024*1024) return false;
+    if (!job.bytes || job.bytes > 64ull*1024*1024) return false;
     D3D12_HEAP_PROPERTIES cpu{}; cpu.Type = D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC buffer{}; buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     buffer.Width = job.bytes; buffer.Height = 1; buffer.DepthOrArraySize = 1;
@@ -151,7 +151,7 @@ inline void SaveCompleted() {
             std::ofstream metadata(stem.wstring()+L".json");
             metadata << "{\"schema\":1,\"probe\":\"mode9-recomputed-pre-network\",\"dispatch\":" << job->sequence
                 << ",\"qpc\":" << job->qpc.QuadPart << ",\"width\":" << job->width << ",\"height\":" << job->height
-                << ",\"origin\":[" << job->originX << ',' << job->originY << "],\"side\":256,\"planes\":9,"
+                << ",\"origin\":[" << job->originX << ',' << job->originY << "],\"side\":" << side << ",\"planes\":9,"
                 << "\"plane_names\":[\"raw0\",\"raw1\",\"reference0\",\"reference1\",\"weights\",\"uv01\",\"corrected0\",\"corrected1\",\"flags-valid0-valid1-conflict-copy\"]}";
             metadata.close();
             std::ofstream params(stem.wstring()+L".params",std::ios::binary);
@@ -161,6 +161,7 @@ inline void SaveCompleted() {
         job->done = true;
         job->atlas.Reset(); job->readback.Reset(); job->heap.Reset(); job->list.Reset(); job->fence.Reset();
     }
+    jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [](const auto& j) { return j->done; }), jobs.end());
 }
 
 inline void STDMETHODCALLTYPE HookExecute(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
@@ -209,7 +210,7 @@ inline bool Initialize(ID3D12GraphicsCommandList* list) {
     HMODULE pin{};
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
         reinterpret_cast<LPCWSTR>(&Initialize),&pin);
-    failed = false;    Report(L"[CAPTURE] ready: center sirens, press F10 or Insert once; six 256x256 probes");
+    failed = false;    Report(L"[CAPTURE] ready: center sirens, press F10 or Insert once; six 512x512 probes");
     return true;
 }
 

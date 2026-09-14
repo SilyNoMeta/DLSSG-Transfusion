@@ -30,14 +30,15 @@ registers = '''
 .reg .f32 %cf<4>;
 '''
 prefix = prefix.replace('.reg .pred %p<260>;', registers + '.reg .pred %p<260>;')
-roi = '''
+SIDE = 512
+roi = f'''
 ld.param.u64 %crd, [TransfusionCapture_param_0+240];
 ld.param.u32 %cr0, [TransfusionCapture_param_0+248];
 ld.param.u32 %cr1, [TransfusionCapture_param_0+252];
 sub.u32 %cr2, %r7, %cr0;
 sub.u32 %cr3, %r30, %cr1;
-setp.ge.u32 %cp0, %cr2, 256;
-setp.ge.u32 %cp1, %cr3, 256;
+setp.ge.u32 %cp0, %cr2, {SIDE};
+setp.ge.u32 %cp1, %cr3, {SIDE};
 or.pred %cp0, %cp0, %cp1;
 @%cp0 bra CaptureExit;
 '''
@@ -52,18 +53,18 @@ planes = [
 ]
 stores = ''
 for i, regs in enumerate(planes):
-    stores += f'add.u32 %cr4, %cr3, {i*256};\n'
+    stores += f'add.u32 %cr4, %cr3, {i*SIDE};\n'
     stores += 'sust.p.2d.v4.b32.zero [%crd, {%cr2,%cr4}], {' + ','.join(f'%f{r}' for r in regs) + '};\n'
-stores += '''
+stores += f'''
 selp.f32 %cf0, 0f3F800000, 0f00000000, %qv0;
 selp.f32 %cf1, 0f3F800000, 0f00000000, %qv1;
 selp.f32 %cf2, 0f3F800000, 0f00000000, %qv4;
 selp.f32 %cf3, 0f3F800000, 0f00000000, %qv8;
-add.u32 %cr4, %cr3, 2048;
-sust.p.2d.v4.b32.zero [%crd, {%cr2,%cr4}], {%cf0,%cf1,%cf2,%cf3};
+add.u32 %cr4, %cr3, {8*SIDE};
+sust.p.2d.v4.b32.zero [%crd, {{%cr2,%cr4}}], {{%cf0,%cf1,%cf2,%cf3}};
 CaptureExit:
 ret;
-}
+}}
 '''
 probe = prefix + stores
 assert len(re.findall(r'sust\.', probe)) == 9
@@ -81,8 +82,11 @@ smoke = '''.version 8.7
 .reg .f32 %f<559>;
 .reg .b32 %r<31>;
 .reg .pred %qv<16>;
-''' + registers + '''
-mov.u32 %r7, %tid.x;
+''' + registers + f'''
+mov.u32 %r7, %ctaid.x;
+shl.b32 %r7, %r7, 8;
+mov.u32 %r8, %tid.x;
+add.u32 %r7, %r7, %r8;
 mov.u32 %r30, %ctaid.y;
 ''' + roi
 for r in sorted({r for plane in planes for r in plane}):
@@ -114,10 +118,16 @@ try:
     headers = ['#pragma once\n#include <cstddef>\nnamespace capture_binary {\n']
     for name, program in [('probe',probe),('smoke',smoke)]:
         link = ptr()
-        checked(link_create(0,None,None,C.byref(link)))
+        err_buf = C.create_string_buffer(4096)
+        opts = (C.c_int * 2)(5, 6) # CU_JIT_ERROR_LOG_BUFFER, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES
+        vals = (ptr * 2)(C.cast(err_buf, ptr), C.cast(C.pointer(C.c_size_t(4096)), ptr))
+        checked(link_create(2, opts, vals, C.byref(link)))
         try:
             data = C.create_string_buffer(program.encode())
-            checked(link_add(link,1,data,len(data),name.encode(),0,None,None))
+            res = link_add(link,1,data,len(data),name.encode(),0,None,None)
+            if res:
+                print(f"JIT Error for {name}:\n{err_buf.value.decode('utf-8', errors='ignore')}")
+                raise RuntimeError(f"CUDA error {res}")
             binary, size = ptr(), C.c_size_t()
             checked(link_complete(link,C.byref(binary),C.byref(size)))
             cubin = C.string_at(binary,size.value)

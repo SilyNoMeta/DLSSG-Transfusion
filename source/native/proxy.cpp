@@ -256,6 +256,8 @@ const wchar_t* GetCurrentTypeName()
     case ProxyType::Winmm: return L"winmm.dll";
     case ProxyType::Dxgi: return L"dxgi.dll";
     case ProxyType::Dinput8: return L"dinput8.dll";
+    case ProxyType::Asi: return L"DLSSG-Transfusion.asi";
+    case ProxyType::Unsupported: return L"unsupported filename";
     default: return L"standalone / ASI";
     }
 }
@@ -543,7 +545,13 @@ ProxyType Initialize(HINSTANCE instance)
         return g_CurrentType;
     }
 
-    g_CurrentType = ProxyType::None;
+    if (lowerName == L"dlssg-transfusion.asi")
+    {
+        g_CurrentType = ProxyType::Asi;
+        return g_CurrentType;
+    }
+
+    g_CurrentType = ProxyType::Unsupported;
     return g_CurrentType;
 }
 

@@ -9,7 +9,7 @@ import re
 import sys
 
 root = Path(__file__).resolve().parents[1]
-build = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / 'tests/startup_hooks/build-shadow'
+build = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else (root / 'tests/startup_hooks/build-siren' if (root / 'tests/startup_hooks/build-siren/quality-patched.ptx').exists() else root / 'tests/startup_hooks/build-shadow')
 header = (root / 'source/native/quality_fix.h').read_text()
 registers = re.search(r'kRegisters = R"ptx\((.*?)\)ptx"', header, re.S)[1]
 exported = (build / 'quality-patched.ptx').read_text()
@@ -39,7 +39,14 @@ setp.ne.u32 %p17, %r0, 0;
 setp.ne.u32 %p16, %r1, 0;
 mov.u32 %r10, 1920;
 mov.u32 %r11, 1080;
-''' + '\n'.join(f'ld.global.f32 %f{r}, [%rd0+{i*4}];' for i,r in enumerate(slots))
+''' + '\n'.join(f'ld.global.f32 %f{r}, [%rd0+{i*4}];' for i,r in enumerate(slots)) + '''
+mov.f32 %f139, %f125;
+mov.f32 %f140, %f126;
+mov.f32 %f141, %f127;
+mov.f32 %f145, %f131;
+mov.f32 %f146, %f132;
+mov.f32 %f147, %f133;
+'''
 shader += policy + '\n' + '\n'.join(f'st.global.f32 [%rd1+{i*4}], %f{r};' for i,r in enumerate(outputs)) + '\nret;\n}\n'
 
 cuda = C.WinDLL('nvcuda.dll')
@@ -103,11 +110,11 @@ try:
         global count
         inputs = dict(zip([125,126,127,131,132,133], a+b)) | (changes or {})
         result = execute(inputs, missing_a, missing_b)
-        expected = (b if copy else a) + b + ([.8,.8] if copy else [.7,.8])
+        expected = ([.2]*3 + [.3]*3 + [.7,.8]) if copy else (a + b + [.7,.8])
         if diagnostic and not missing_a and not missing_b:
             expected[:6] = (a if diagnostic == 1 else b) * 2
-        if missing_a: expected[:3] = [.2]*3
-        if missing_b: expected[3:6] = [.3]*3
+        if missing_a or inputs.get(123, 0.5) < 0: expected[:3] = [.2]*3
+        if missing_b or inputs.get(129, 0.5) > 1: expected[3:6] = [.3]*3
         if not all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result,expected)):
             raise AssertionError(f'{name}: {result} != {expected}')
         count += 1
@@ -130,10 +137,14 @@ try:
     check('achromatic edge',[.1]*3,[.9]*3)
     check('missing past',[.2,.45,.2],[.2,.55,1.],missing_a=1)
     check('missing current',[.2,.45,.2],[.2,.55,1.],missing_b=1)
-    # Low-confidence current must not become an overwrite source.
-    result=execute({125:.2,126:.45,127:.2,131:.2,132:.55,133:1.,149:.1})
-    assert all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result,[.2,.45,.2,.3,.3,.3,.7,.8]))
-    print(f'GPU_SHADOW_SCALE_OK (siren_mode={siren_mode}, diagnostic={diagnostic}): {count+1} cases; exported experimental policy executed')
+    # Candidate Conflict Firewall:
+    # Under chromatic conflict passing shadow veto, geometric warp is bypassed.
+    # Stock DLSS-G candidates are preserved untouched (no candidate overwrite):
+    result_conflict = execute({125:.2,126:.45,127:.2,131:.2,132:.55,133:1.,148:.7,149:.3})
+    assert all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result_conflict,[.2,.2,.2,.3,.3,.3,.7,.8]))
+    result_conflict2 = execute({125:.2,126:.45,127:.2,131:.2,132:.55,133:1.,148:.3,149:.7})
+    assert all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result_conflict2,[.2,.2,.2,.3,.3,.3,.7,.8]))
+    print(f'GPU_SHADOW_SCALE_OK (siren_mode={siren_mode}, diagnostic={diagnostic}): {count+2} cases; exported experimental policy executed')
 finally:
     if src.value: call('cuMemFree_v2',src)
     if dst.value: call('cuMemFree_v2',dst)

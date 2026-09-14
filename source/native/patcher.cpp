@@ -10,6 +10,7 @@
 #include "detours/detours.h"
 #include "nvidia_mfg_manifest.generated.h"
 #include "pacing_policy.h"
+#include "multiplier_overlay.h"
 
 #include <Windows.h>
 #include <TlHelp32.h>
@@ -80,6 +81,8 @@ std::atomic<uint32_t> gNumFramesToGenerateMax{0};
 std::atomic<uint32_t> gDlssgStatus{0};
 std::atomic<bool> gDynamicMfgSupported{false};
 std::atomic<uint64_t> gStateSampleTick{0};
+std::atomic<uint64_t> gActualMultiplierSampleTick{0};
+std::atomic<uint64_t> gFrameGenerationSession{0};
 std::atomic<uint64_t> gSetOptionsCalls{0};
 std::atomic<uint64_t> gGetStateCalls{0};
 std::atomic<uint64_t> gLiveReapplyCount{0};
@@ -224,6 +227,17 @@ uint64_t gFpsWindowPresentedFrames = 0;
 
 void ObserveActiveWrapperProvider(void* function);
 
+void SetFrameGenerationEnabled(bool enabled)
+{
+    const bool wasEnabled = gGameFrameGenerationOn.exchange(enabled, std::memory_order_acq_rel);
+    if (enabled && !wasEnabled)
+    {
+        gActualFramesPresented.store(0, std::memory_order_relaxed);
+        gActualMultiplierSampleTick.store(0, std::memory_order_release);
+        gFrameGenerationSession.fetch_add(1, std::memory_order_acq_rel);
+    }
+}
+
 void Log(const wchar_t* format, ...)
 {
     wchar_t message[2048]{};
@@ -255,7 +269,7 @@ void MidpointLog(const wchar_t* message)
 }
 
 std::atomic<bool> gConfigForceOta{false};
-std::atomic<bool> gConfigPatchFlipMetering{true};
+std::atomic<bool> gConfigPatchFlipMetering{false};
 std::atomic<bool> gConfigBlackwellTransfusion{true};
 std::atomic<bool> gConfigQualityFix{true};
 std::atomic<bool> gConfigDisableMenuDetection{true};
@@ -756,6 +770,7 @@ void RecordDlssgStateResult(
     if (validMultiplierUpdate)
     {
         previousMultiplier = gActualFramesPresented.exchange(currentMultiplier, std::memory_order_relaxed);
+        gActualMultiplierSampleTick.store(GetTickCount64(), std::memory_order_release);
     }
 
     if (fpsFrameSample)
@@ -1008,6 +1023,7 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         "  \"dynamicTargetFrameRate\": %u,\n"
         "  \"dynamicExperimental56\": %s,\n"
         "  \"forceOTA\": %s,\n"
+        "  \"showOverlay\": %s,\n"
         "  \"patchFlipMetering\": %s,\n"
         "  \"blackwellTransfusion\": %s,\n"
         "  \"qualityValidWarp\": %s,\n"
@@ -1021,6 +1037,7 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         control.dynamicTargetFrameRate,
         control.dynamicExperimental56 ? "true" : "false",
         gConfigForceOta.load(std::memory_order_relaxed) ? "true" : "false",
+        multiplier_overlay::IsVisible() ? "true" : "false",
         gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? "true" : "false",
         gConfigBlackwellTransfusion.load(std::memory_order_relaxed) ? "true" : "false",
         gConfigQualityFix.load(std::memory_order_relaxed) ? "true" : "false",
@@ -1115,6 +1132,13 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
         || (FindJsonValue(content, "forceOta", otaOffset) && TryParseBoolean(content, "forceOta", forceOta));
     if (hasOta) gConfigForceOta.store(forceOta, std::memory_order_relaxed);
     else if (missingKeys) missingKeys->push_back("forceOTA");
+
+    size_t overlayOffset = 0;
+    bool showOverlay = multiplier_overlay::IsVisible();
+    const bool hasOverlay = FindJsonValue(content, "showOverlay", overlayOffset)
+        && TryParseBoolean(content, "showOverlay", showOverlay);
+    if (hasOverlay) multiplier_overlay::SetVisible(showOverlay);
+    else if (missingKeys) missingKeys->push_back("showOverlay");
 
     size_t flipOffset = 0;
     bool patchFlip = gConfigPatchFlipMetering.load(std::memory_order_relaxed);
@@ -1955,7 +1979,9 @@ sl::Result HookSlDLSSGSetOptions(
     const bool enabled = options.mode == sl::DLSSGMode::eOn
         || options.mode == sl::DLSSGMode::eAuto
         || options.mode == sl::DLSSGMode::eDynamic;
-    gGameFrameGenerationOn.store(enabled, std::memory_order_release);
+    // Do not carry the previous FG session's presentation count into a new
+    // session. Transient GetState values of 0/1 are intentionally ignored.
+    SetFrameGenerationEnabled(enabled);
     if (!enabled)
     {
         gSetOptionsSeen.store(true, std::memory_order_release);
@@ -2314,7 +2340,7 @@ sl::Result HookSlSetData(const sl::BaseStructure* inputs, sl::CommandBuffer* cmd
         const bool enabled = options->mode == sl::DLSSGMode::eOn
             || options->mode == sl::DLSSGMode::eAuto
             || options->mode == sl::DLSSGMode::eDynamic;
-        gGameFrameGenerationOn.store(enabled, std::memory_order_release);
+        SetFrameGenerationEnabled(enabled);
 
         if (viewport)
             CaptureGameOptions(*viewport, *options);
@@ -4539,10 +4565,15 @@ bool RegisterDllNotification()
     return registered;
 }
 
-bool ProcessStandaloneHotkeys(ControlConfig& control)
+bool ProcessStandaloneHotkeys(ControlConfig& control, bool& controlChanged)
 {
+    controlChanged = false;
     const bool ctrlPressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool altPressed = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    const bool overlayDown = (GetAsyncKeyState('O') & 0x8000) != 0;
+    static bool sOverlayWasDown = false;
+    const bool overlayPressed = ctrlPressed && altPressed && overlayDown && !sOverlayWasDown;
+    sOverlayWasDown = overlayDown;
     if (!ctrlPressed || !altPressed)
         return false;
 
@@ -4552,8 +4583,17 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
         return false;
 
     bool changed = false;
+    if (overlayPressed)
+    {
+        const bool visible = !multiplier_overlay::IsVisible();
+        multiplier_overlay::SetVisible(visible);
+        changed = true;
+        Log(L"[HOTKEY] Overlay %s", visible ? L"enabled" : L"disabled");
+    }
     for (uint32_t mult = 2; mult <= 6; ++mult)
     {
+        if (changed)
+            break;
         const int keyChar = '0' + mult;
         const int keyNumpad = VK_NUMPAD0 + mult;
         if ((GetAsyncKeyState(keyChar) & 0x8000) != 0 || (GetAsyncKeyState(keyNumpad) & 0x8000) != 0)
@@ -4561,6 +4601,7 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
             control.multiplier = mult;
             control.dynamic = false;
             changed = true;
+            controlChanged = true;
             Log(L"[HOTKEY] Multiplier set to %ux (fixed mode)", mult);
             break;
         }
@@ -4572,6 +4613,7 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
             control.multiplier++;
         control.dynamic = false;
         changed = true;
+        controlChanged = true;
         Log(L"[HOTKEY] Multiplier increased to %ux (fixed mode)", control.multiplier);
     }
     else if (!changed && (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0) // PageDown
@@ -4580,6 +4622,7 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
             control.multiplier--;
         control.dynamic = false;
         changed = true;
+        controlChanged = true;
         Log(L"[HOTKEY] Multiplier decreased to %ux (fixed mode)", control.multiplier);
     }
     else if (!changed && (GetAsyncKeyState('D') & 0x8000) != 0)
@@ -4588,6 +4631,7 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
         if (control.dynamic && control.dynamicTargetFrameRate == 0)
             control.dynamicTargetFrameRate = 120;
         changed = true;
+        controlChanged = true;
         if (control.dynamic)
         {
             Log(L"[HOTKEY] Mode toggled: DYNAMIC (target=%u FPS)",
@@ -4626,6 +4670,7 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
                 control.dynamicTargetFrameRate = newTarget;
                 control.dynamic = true;
                 changed = true;
+                controlChanged = true;
                 Log(L"[HOTKEY] Dynamic target FPS increased to %u FPS (dynamic mode enabled)",
                     control.dynamicTargetFrameRate);
             }
@@ -4645,6 +4690,7 @@ bool ProcessStandaloneHotkeys(ControlConfig& control)
                 control.dynamicTargetFrameRate = newTarget;
                 control.dynamic = true;
                 changed = true;
+                controlChanged = true;
                 Log(L"[HOTKEY] Dynamic target FPS decreased to %u FPS (dynamic mode enabled)",
                     control.dynamicTargetFrameRate);
             }
@@ -4816,10 +4862,14 @@ DWORD WINAPI PatchWorker(void* context)
                 deviceStart != 0, gD3DDeviceThread.load(std::memory_order_relaxed),
                 static_cast<unsigned long long>(deviceStart ? GetTickCount64() - deviceStart : 0));
         }
-        if (ProcessStandaloneHotkeys(activeControl))
+        bool controlChanged = false;
+        if (ProcessStandaloneHotkeys(activeControl, controlChanged))
         {
-            StoreControl(activeControl);
-            PublishLiveBridge(activeControl);
+            if (controlChanged)
+            {
+                StoreControl(activeControl);
+                PublishLiveBridge(activeControl);
+            }
             WriteControlFile(gConfigPath, activeControl);
             ReadLastWriteTime(gConfigPath, configWriteTime);
             WriteBridgeStatus(activeControl, pid);
@@ -4890,7 +4940,12 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH)
     {
         // /MT requires CRT thread notifications; do not disable them.
-        proxy::Initialize(instance);
+        if (proxy::Initialize(instance) == proxy::ProxyType::Unsupported)
+        {
+            OutputDebugStringW(L"DLSSG-Transfusion: unsupported DLL filename. Rename to version.dll, dxgi.dll, winmm.dll, or dinput8.dll; use .asi only with an ASI loader.\n");
+            SetLastError(ERROR_BAD_EXE_FORMAT);
+            return FALSE;
+        }
         midpoint_fix::SetLogCallback(&MidpointLog);
         // Automatic storage reserves 64 KiB in DllMain's prologue for EVERY
         // notification, including DLL_THREAD_ATTACH on small driver stacks.
@@ -4905,7 +4960,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         InstallSetDataHook();
         InstallUiTagHooks();
         InstallInterposerDetours();
-        InstallLoadLibraryHooks();
+    InstallLoadLibraryHooks();
+        multiplier_overlay::Install(&gActualFramesPresented, &gAppliedMultiplier,
+            &gGameFrameGenerationOn, &gFrameGenerationSession,
+            &gActualMultiplierSampleTick);
         RegisterDllNotification();
         HANDLE thread = CreateThread(nullptr, 0, PatchWorker, instance, 0, nullptr);
         if (thread)
@@ -4915,6 +4973,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
     {
         crash_diagnostics::Shutdown();
         gStopWorker.store(true, std::memory_order_release);
+        multiplier_overlay::Uninstall();
         UninstallNvApiHook();
         UninstallLoadLibraryHooks();
         UninstallInterposerDetours();
