@@ -86,20 +86,20 @@ abs.f32 %qf8, %qf8;
 add.f32 %qf6, %qf6, %qf7;
 add.f32 %qf6, %qf6, %qf8;
 max.f32 %qf4, %qf4, %qf5;
-max.f32 %qf4, %qf4, 0f3F800000;
-mul.f32 %qf4, %qf4, 0f3E3851EC;
+max.f32 %qf4, %qf4, 0f3F000000;
+mul.f32 %qf4, %qf4, 0f3DCCCCCD;
 setp.le.f32 %qv4, %qf6, %qf4;
 and.pred %qv3, %qv3, %qv4;
 
 and.pred %qv0, %qv0, %qv3;
 and.pred %qv1, %qv1, %qv3;
 
-// Full geometric motion warp floor (0.98f = 0f3F7AE148)
+// Full geometric motion warp floor (0.95f = 0f3F733333)
 // Eliminates fence tearing, eliminates background gap lag, locks airplane windows, zero HUD ghosting.
-max.f32 %qf0, %f148, 0f3F7AE148;
+max.f32 %qf0, %f148, 0f3F733333;
 min.f32 %qf0, %qf0, 0f3F800000;
 
-max.f32 %qf1, %f149, 0f3F7AE148;
+max.f32 %qf1, %f149, 0f3F733333;
 min.f32 %qf1, %qf1, 0f3F800000;
 
 sub.f32 %qf2, %f125, %f115;
