@@ -76,12 +76,23 @@ abs.f32 %qf11, %qf11;
 add.f32 %qf9, %qf9, %qf10;
 add.f32 %qf9, %qf9, %qf11;
 
+// Track 1: High-contrast rigid geometry recovery (Airplane passenger windows, cockpit frames, structural edges)
+// Recovers repetitive geometry suffering from optical flow aperture confusion.
+// Requires high temporal contrast (UnwarpedDiff > 0.80f = 0f3F4CCCCD) and tight warp lock (WarpedDiff < 0.15f = 0f3E19999A).
+// Asphalt road never triggers (road UnwarpedDiff is ~0.25-0.35f << 0.80f).
+setp.gt.f32 %qv6, %qf6, 0f3F4CCCCD;
+setp.lt.f32 %qv2, %qf9, 0f3E19999A;
+and.pred %qv6, %qv6, %qv2;
+
 // Track 2: Thin geometry recovery (WarpedDiff < 0.24f = 0f3E75C28F, disparity margin >= 0.05f = 0f3D4CCCCD)
 // Solid foliage & wire mesh protection: retains solid fence wires/grass
 add.f32 %qf10, %qf9, 0f3D4CCCCD;
 setp.lt.f32 %qv4, %qf10, %qf6;
 setp.lt.f32 %qv2, %qf9, 0f3E75C28F;
 and.pred %qv4, %qv4, %qv2;
+
+// Combine Track 1 (airplane windows) and Track 2 (fence wires/grass) into solid 0.98f floor
+or.pred %qv4, %qv4, %qv6;
 and.pred %qv4, %qv4, %qv3;
 
 // Track 3: Fence gap background motion recovery
