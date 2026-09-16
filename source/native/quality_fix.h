@@ -97,10 +97,11 @@ and.pred %qv4, %qv4, %qv3;
 
 // Track 3: Fence gap background motion recovery
 // Rescues background seen through wire fence gaps from falling back to unwarped judder.
-// Requires valid motion (UnwarpedDiff > 0.05f = 0f3D4CCCCD) and bounded warp error (WarpedDiff < 0.45f = 0f3EE66666).
+// Potent tuning for 6x cadence and 1080p resolution:
+// Sensitivity (UnwarpedDiff > 0.02f = 0f3CA3D70A), wider warp margin (WarpedDiff < 0.65f = 0f3F266666).
 // Fully preserves static HUD (HUD has UnwarpedDiff == 0.0f).
-setp.gt.f32 %qv5, %qf6, 0f3D4CCCCD;
-setp.lt.f32 %qv2, %qf9, 0f3EE66666;
+setp.gt.f32 %qv5, %qf6, 0f3CA3D70A;
+setp.lt.f32 %qv2, %qf9, 0f3F266666;
 and.pred %qv5, %qv5, %qv2;
 and.pred %qv5, %qv5, %qv3;
 
@@ -110,13 +111,13 @@ and.pred %qv0, %qv0, %qv2;
 and.pred %qv1, %qv1, %qv2;
 
 // Calibrated confidence floors:
-// Thin geometry (%qv4): 0.98f (0f3F7AE148) -> 100% solid, tear-free fence wires
-// Gap background (%qv5): 0.72f (0f3F3851EC) -> smooth camera motion interpolation up to 6x, zero stutter/lag
-selp.f32 %qf0, 0f3F7AE148, 0f3F3851EC, %qv4;
+// Thin geometry (%qv4: wires, grass, airplane windows): 0.98f (0f3F7AE148)
+// Gap background (%qv5): 0.88f (0f3F6147AE) -> potent camera motion interpolation for 6x 1080p
+selp.f32 %qf0, 0f3F7AE148, 0f3F6147AE, %qv4;
 max.f32 %qf0, %f148, %qf0;
 min.f32 %qf0, %qf0, 0f3F800000;
 
-selp.f32 %qf1, 0f3F7AE148, 0f3F3851EC, %qv4;
+selp.f32 %qf1, 0f3F7AE148, 0f3F6147AE, %qv4;
 max.f32 %qf1, %f149, %qf1;
 min.f32 %qf1, %qf1, 0f3F800000;
 
