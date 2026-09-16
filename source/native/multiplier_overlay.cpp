@@ -68,12 +68,30 @@ struct Context
     uint32_t presentedFpsMilli{};
     bool frameGenerationWasOn{};
     uint64_t observedFgSession{};
+    uint64_t fgSessionReadyTick{};
     UINT rtvStep{};
     DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
     UINT count{};
     bool ready{};
+    bool initializing{};
+    uint64_t readyTick{};
+    uint64_t firstSuccessfulPresentTick{};
+    uint32_t successfulPresents{};
+    uint64_t lastInitializationAttemptTick{};
 };
 std::unordered_map<IDXGISwapChain*, Context> gContexts;
+
+void ReleaseRendererResources(Context& c)
+{
+    for(size_t i=0;i<c.uploads.size() && i<c.mappedUploads.size();++i)
+        if(c.uploads[i] && c.mappedUploads[i]) c.uploads[i]->Unmap(0,nullptr);
+    c.mappedUploads.clear(); c.uploads.clear(); c.buffers.clear();
+    c.allocators.clear(); c.fenceValues.clear(); c.vertices.clear();
+    c.list.Reset(); c.pipeline.Reset(); c.rootSignature.Reset();
+    c.rtvHeap.Reset(); c.fence.Reset(); c.device.Reset();
+    if(c.fenceEvent) { CloseHandle(c.fenceEvent); c.fenceEvent=nullptr; }
+    c.ready=false;
+}
 
 template<typename T> T Slot(void* object, size_t index)
 {
@@ -126,6 +144,12 @@ void AddGlyph(std::vector<Vertex>& v, char glyph, float x, float y, float scale,
 
 bool BuildContext(IDXGISwapChain* swapChain, Context& c)
 {
+    ReleaseRendererResources(c);
+    struct FailureCleanup {
+        Context& context;
+        bool success{};
+        ~FailureCleanup(){if(!success) ReleaseRendererResources(context);}
+    } cleanup{c};
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(swapChain->GetDesc(&desc)) || !desc.BufferCount || !desc.BufferDesc.Width || !desc.BufferDesc.Height)
         return false;
@@ -173,14 +197,82 @@ bool BuildContext(IDXGISwapChain* swapChain, Context& c)
     pd.SampleMask=UINT_MAX; pd.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID; pd.RasterizerState.CullMode=D3D12_CULL_MODE_NONE; pd.DepthStencilState.DepthEnable=FALSE; pd.DepthStencilState.StencilEnable=FALSE; pd.InputLayout={il,2}; pd.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; pd.NumRenderTargets=1; pd.RTVFormats[0]=c.format; pd.SampleDesc.Count=1;
     if (FAILED(c.device->CreateGraphicsPipelineState(&pd,IID_PPV_ARGS(&c.pipeline))) ||
         FAILED(c.device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,c.allocators[0].Get(),c.pipeline.Get(),IID_PPV_ARGS(&c.list)))) return false;
-    c.list->Close(); c.ready=true; return true;
+    c.list->Close(); c.ready=true; c.readyTick=GetTickCount64(); cleanup.success=true; return true;
+}
+
+DWORD WINAPI InitializeContextWorker(void* parameter)
+{
+    auto* swapChain=static_cast<IDXGISwapChain*>(parameter);
+    {
+        std::lock_guard lock(gMutex);
+        auto it=gContexts.find(swapChain);
+        if(it!=gContexts.end() && !it->second.ready)
+            BuildContext(swapChain,it->second);
+        if(it!=gContexts.end()) it->second.initializing=false;
+    }
+    swapChain->Release();
+    return 0;
+}
+
+void ScheduleContextInitialization(IDXGISwapChain* swapChain)
+{
+    {
+        std::lock_guard lock(gMutex);
+        auto it=gContexts.find(swapChain);
+        const uint64_t now=GetTickCount64();
+        if(it==gContexts.end() || it->second.ready || it->second.initializing
+            || (it->second.lastInitializationAttemptTick
+                && now-it->second.lastInitializationAttemptTick<5000)) return;
+        it->second.initializing=true;
+        it->second.lastInitializationAttemptTick=now;
+        swapChain->AddRef();
+    }
+    HANDLE thread=CreateThread(nullptr,0,InitializeContextWorker,swapChain,0,nullptr);
+    if(thread) CloseHandle(thread);
+    else {
+        swapChain->Release();
+        std::lock_guard lock(gMutex);
+        auto it=gContexts.find(swapChain);
+        if(it!=gContexts.end()) it->second.initializing=false;
+    }
+}
+
+void ObserveSuccessfulPresent(IDXGISwapChain* swapChain, HRESULT result)
+{
+    if (FAILED(result) || !gVisible.load(std::memory_order_acquire)) return;
+
+    bool initialize=false;
+    {
+        std::unique_lock lock(gMutex,std::try_to_lock);
+        if(!lock.owns_lock()) return;
+        auto it=gContexts.find(swapChain);
+        if(it==gContexts.end()) return;
+        Context& c=it->second;
+        const uint64_t now=GetTickCount64();
+        if(!c.firstSuccessfulPresentTick) c.firstSuccessfulPresentTick=now;
+        if(c.successfulPresents<UINT32_MAX) ++c.successfulPresents;
+
+        // RE Engine creates its swapchain before Streamline, DLSS-G and its own
+        // presentation workers have finished settling. Querying its backbuffers
+        // or submitting work during that phase can lock the engine and another
+        // DXGI interceptor against each other. Arm only after the real swapchain
+        // has demonstrably presented normally for a while.
+        initialize=!c.ready && !c.initializing && c.successfulPresents>=120
+            && now-c.firstSuccessfulPresentTick>=3000;
+    }
+    if(initialize) ScheduleContextInitialization(swapChain);
 }
 
 void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
 {
     if(!gActual || !gFgOn) return;
     const bool fgOn=gFgOn->load(std::memory_order_relaxed);
-    std::lock_guard lock(gMutex); auto it=gContexts.find(swapChain); if(it==gContexts.end()) return; Context& c=it->second;
+    // Present must never wait behind overlay bookkeeping. RE Engine can present
+    // from tightly synchronized paths where blocking here deadlocks the game's
+    // queue or Streamline's presentation worker.
+    std::unique_lock lock(gMutex,std::try_to_lock);
+    if(!lock.owns_lock()) return;
+    auto it=gContexts.find(swapChain); if(it==gContexts.end()) return; Context& c=it->second;
     if(!fgOn) {
         c.frameGenerationWasOn=false; c.fpsWindowStart={}; c.presentsInWindow=0;
         c.presentedFpsMilli=0; return;
@@ -189,28 +281,39 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     if(!c.frameGenerationWasOn || c.observedFgSession!=fgSession) {
         c.frameGenerationWasOn=true; c.fpsWindowStart={}; c.presentsInWindow=0;
         c.presentedFpsMilli=0; c.observedFgSession=fgSession;
+        c.fgSessionReadyTick=GetTickCount64();
     }
-    LARGE_INTEGER now{},frequency{};
-    if((presentFlags & DXGI_PRESENT_TEST)==0 && QueryPerformanceCounter(&now)
-        && QueryPerformanceFrequency(&frequency)) {
+    LARGE_INTEGER now{};
+    static const int64_t frequency=[](){LARGE_INTEGER value{};return QueryPerformanceFrequency(&value)?value.QuadPart:0;}();
+    if((presentFlags & DXGI_PRESENT_TEST)==0 && frequency>0 && QueryPerformanceCounter(&now)) {
         if(!c.fpsWindowStart.QuadPart) c.fpsWindowStart=now;
         ++c.presentsInWindow;
         const uint64_t elapsed=static_cast<uint64_t>(now.QuadPart-c.fpsWindowStart.QuadPart);
-        if(elapsed>=static_cast<uint64_t>(frequency.QuadPart)/2u) {
+        if(elapsed>=static_cast<uint64_t>(frequency)/2u) {
             c.presentedFpsMilli=static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX,
-                (c.presentsInWindow*static_cast<uint64_t>(frequency.QuadPart)*1000u+elapsed/2u)/elapsed));
+                (c.presentsInWindow*static_cast<uint64_t>(frequency)*1000u+elapsed/2u)/elapsed));
             c.fpsWindowStart=now; c.presentsInWindow=0;
         }
     }
     if(!gVisible.load()) return;
+    // Loading screens commonly tear down and recreate the DLSS-G session while
+    // keeping the DXGI swapchain alive. Let the new presentation pipeline settle
+    // before placing any independent work on its queue.
+    if(!c.fgSessionReadyTick || GetTickCount64()-c.fgSessionReadyTick<1500) return;
     const uint64_t sampleAge=gSampleTick ? GetTickCount64()-gSampleTick->load(std::memory_order_acquire) : UINT64_MAX;
     uint32_t mult=gActual->load(std::memory_order_relaxed);
     // Turning FG off legitimately publishes zero. On re-enable, show the last
     // accepted setting immediately instead of waiting for the first state query.
     if((mult<2 || sampleAge>2500) && gApplied) mult=gApplied->load(std::memory_order_relaxed);
     if(mult<2 || mult>6) return;
-    if(!c.ready && !BuildContext(swapChain,c)) return;
+    // Resource creation and shader compilation are never allowed on Present.
+    // A short grace period also keeps overlay submissions out of engine and
+    // Streamline startup synchronization.
+    if(!c.ready || GetTickCount64()-c.readyTick<1500) return;
     ComPtr<IDXGISwapChain3> sc3; if(FAILED(swapChain->QueryInterface(IID_PPV_ARGS(&sc3)))) return; const UINT i=sc3->GetCurrentBackBufferIndex(); if(i>=c.count) return;
+    // Avoid formatting and rebuilding glyph geometry when this backbuffer is
+    // still occupied by the preceding overlay submission.
+    if(c.fenceValues[i] && c.fence->GetCompletedValue()<c.fenceValues[i]) return;
     const uint32_t generatedMilli=c.presentedFpsMilli;
     const uint32_t generatedFps=(generatedMilli+500u)/1000u;
     const uint32_t baseFps=(generatedMilli+mult*500u)/(mult*1000u);
@@ -227,12 +330,13 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
         if(*p==' ') glyphX+=6.f;
         else { AddGlyph(vertices,*p,glyphX,y+2.5f,scale,float(d.Width),float(d.Height)); glyphX+=advance; }
     }
-    if(c.fenceValues[i] && c.fence->GetCompletedValue()<c.fenceValues[i]){if(FAILED(c.fence->SetEventOnCompletion(c.fenceValues[i],c.fenceEvent)))return;WaitForSingleObject(c.fenceEvent,1000);if(c.fence->GetCompletedValue()<c.fenceValues[i])return;}
+    // Never stall Present waiting for overlay work. If this backbuffer is still
+    // busy, skip one indicator update and let the game continue presenting.
     const UINT64 bytes=vertices.size()*sizeof(Vertex);
     if(bytes>Context::kVertexBufferBytes || !c.mappedUploads[i]) return;
     memcpy(c.mappedUploads[i],vertices.data(),size_t(bytes));
-    c.allocators[i]->Reset(); c.list->Reset(c.allocators[i].Get(),c.pipeline.Get()); D3D12_RESOURCE_BARRIER b{D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,D3D12_RESOURCE_BARRIER_FLAG_NONE}; b.Transition={c.buffers[i].Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET}; c.list->ResourceBarrier(1,&b);
-    auto rtv=c.rtvHeap->GetCPUDescriptorHandleForHeapStart(); rtv.ptr+=SIZE_T(i)*c.rtvStep; c.list->OMSetRenderTargets(1,&rtv,FALSE,nullptr); D3D12_VIEWPORT vp{0,0,float(d.Width),float(d.Height),0,1}; D3D12_RECT sr{0,0,LONG(d.Width),LONG(d.Height)}; c.list->RSSetViewports(1,&vp); c.list->RSSetScissorRects(1,&sr); c.list->SetGraphicsRootSignature(c.rootSignature.Get()); c.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); D3D12_VERTEX_BUFFER_VIEW vb{c.uploads[i]->GetGPUVirtualAddress(),UINT(bytes),sizeof(Vertex)}; c.list->IASetVertexBuffers(0,1,&vb); c.list->DrawInstanced(UINT(vertices.size()),1,0,0); std::swap(b.Transition.StateBefore,b.Transition.StateAfter); c.list->ResourceBarrier(1,&b); c.list->Close(); ID3D12CommandList* lists[]={c.list.Get()}; c.queue->ExecuteCommandLists(1,lists);const UINT64 fv=c.nextFenceValue++;if(SUCCEEDED(c.queue->Signal(c.fence.Get(),fv)))c.fenceValues[i]=fv;
+    if(FAILED(c.allocators[i]->Reset()) || FAILED(c.list->Reset(c.allocators[i].Get(),c.pipeline.Get()))) return; D3D12_RESOURCE_BARRIER b{D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,D3D12_RESOURCE_BARRIER_FLAG_NONE}; b.Transition={c.buffers[i].Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET}; c.list->ResourceBarrier(1,&b);
+    auto rtv=c.rtvHeap->GetCPUDescriptorHandleForHeapStart(); rtv.ptr+=SIZE_T(i)*c.rtvStep; c.list->OMSetRenderTargets(1,&rtv,FALSE,nullptr); D3D12_VIEWPORT vp{0,0,float(d.Width),float(d.Height),0,1}; D3D12_RECT sr{0,0,LONG(d.Width),LONG(d.Height)}; c.list->RSSetViewports(1,&vp); c.list->RSSetScissorRects(1,&sr); c.list->SetGraphicsRootSignature(c.rootSignature.Get()); c.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); D3D12_VERTEX_BUFFER_VIEW vb{c.uploads[i]->GetGPUVirtualAddress(),UINT(bytes),sizeof(Vertex)}; c.list->IASetVertexBuffers(0,1,&vb); c.list->DrawInstanced(UINT(vertices.size()),1,0,0); std::swap(b.Transition.StateBefore,b.Transition.StateAfter); c.list->ResourceBarrier(1,&b); if(FAILED(c.list->Close()))return; ID3D12CommandList* lists[]={c.list.Get()}; c.queue->ExecuteCommandLists(1,lists);const UINT64 fv=c.nextFenceValue++;if(SUCCEEDED(c.queue->Signal(c.fence.Get(),fv)))c.fenceValues[i]=fv;
 }
 
 struct PresentScope
@@ -245,37 +349,47 @@ HRESULT STDMETHODCALLTYPE HookPresent(IDXGISwapChain* s,UINT a,UINT b)
 {
     PresentScope scope;
     if(scope.outer) Draw(s,b);
-    return gPresent(s,a,b);
+    const HRESULT result=gPresent(s,a,b);
+    if(scope.outer) ObserveSuccessfulPresent(s,result);
+    return result;
 }
 HRESULT STDMETHODCALLTYPE HookPresent1(IDXGISwapChain1* s,UINT a,UINT b,const DXGI_PRESENT_PARAMETERS* p)
 {
     PresentScope scope;
     if(scope.outer) Draw(s,b);
-    return gPresent1(s,a,b,p);
+    const HRESULT result=gPresent1(s,a,b,p);
+    if(scope.outer) ObserveSuccessfulPresent(s,result);
+    return result;
 }
 HRESULT STDMETHODCALLTYPE HookResize(IDXGISwapChain* s,UINT a,UINT b,UINT c,DXGI_FORMAT d,UINT e)
 {
-    std::lock_guard l(gMutex);
-    auto i=gContexts.find(s);
-    if(i==gContexts.end()) return gResizeBuffers(s,a,b,c,d,e);
-    Context& old=i->second;
-    for(UINT64 value:old.fenceValues) {
-        if(value && old.fence->GetCompletedValue()<value) {
-            old.fence->SetEventOnCompletion(value,old.fenceEvent);
-            WaitForSingleObject(old.fenceEvent,1000);
+    ComPtr<ID3D12CommandQueue> queue;
+    {
+        std::lock_guard l(gMutex);
+        auto i=gContexts.find(s);
+        if(i==gContexts.end()) return gResizeBuffers(s,a,b,c,d,e);
+        Context& old=i->second;
+        for(UINT64 value:old.fenceValues) {
+            if(value && old.fence->GetCompletedValue()<value) {
+                old.fence->SetEventOnCompletion(value,old.fenceEvent);
+                WaitForSingleObject(old.fenceEvent,1000);
+            }
         }
+        queue=old.queue;
+        ReleaseRendererResources(old);
+        gContexts.erase(i);
     }
-    auto queue=old.queue;
-    if(old.fenceEvent) CloseHandle(old.fenceEvent);
-    gContexts.erase(i);
     const HRESULT hr=gResizeBuffers(s,a,b,c,d,e);
-    if(SUCCEEDED(hr)){Context fresh;fresh.queue=queue;gContexts.emplace(s,std::move(fresh));}
+    if(SUCCEEDED(hr)) {
+        {std::lock_guard l(gMutex);Context fresh;fresh.queue=queue;gContexts.emplace(s,std::move(fresh));}
+    }
     return hr;
 }
 
 void Track(IDXGISwapChain* s,IUnknown* device)
 {
     if(!s||!device)return; ComPtr<ID3D12CommandQueue> q; if(FAILED(device->QueryInterface(IID_PPV_ARGS(&q))))return;
+    if(q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
     {std::lock_guard l(gMutex);auto& c=gContexts[s];c.queue=q;}
     if(gPresent)return; gPresent=Slot<Present>(s,8); gResizeBuffers=Slot<ResizeBuffers>(s,13); ComPtr<IDXGISwapChain1> s1;if(SUCCEEDED(s->QueryInterface(IID_PPV_ARGS(&s1))))gPresent1=Slot<Present1>(s1.Get(),22);
     DetourTransactionBegin();DetourUpdateThread(GetCurrentThread());DetourAttach(reinterpret_cast<void**>(&gPresent),HookPresent);DetourAttach(reinterpret_cast<void**>(&gResizeBuffers),HookResize);if(gPresent1)DetourAttach(reinterpret_cast<void**>(&gPresent1),HookPresent1);DetourTransactionCommit();

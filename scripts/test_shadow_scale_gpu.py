@@ -106,15 +106,26 @@ try:
         call('cuMemcpyDtoH_v2',result,dst,C.sizeof(result))
         return list(result)
     count = 0
+    def strict_shadow(a, b):
+        l0, l1 = sum(abs(v) for v in a), sum(abs(v) for v in b)
+        if l0 <= .01 or l1 <= .01:
+            return False
+        n0, n1 = [v/l0 for v in a], [v/l1 for v in b]
+        dot = sum(x*y for x,y in zip(n0,n1))
+        norm = sum(x*x for x in n0) * sum(x*x for x in n1)
+        residual_ok = dot > 0 and norm - dot*dot <= norm * .20
+        ratio = min(l0,l1) / max(l0,l1)
+        return residual_ok and .35 - 1e-6 <= ratio <= .85 + 1e-6
     def check(name, a, b, copy=False, missing_a=0, missing_b=0, changes=None):
         global count
         inputs = dict(zip([125,126,127,131,132,133], a+b)) | (changes or {})
         result = execute(inputs, missing_a, missing_b)
-        expected = ([.2]*3 + [.3]*3 + [.7,.8]) if copy else (a + b + [.7,.8])
-        if diagnostic and not missing_a and not missing_b:
+        stock = strict_shadow(a, b)
+        expected = ([.2]*3 + [.3]*3 + [.7,.8]) if copy or stock else (a + b + [.7,.8])
+        if diagnostic and not stock and not missing_a and not missing_b:
             expected[:6] = (a if diagnostic == 1 else b) * 2
-        if missing_a or inputs.get(123, 0.5) < 0: expected[:3] = [.2]*3
-        if missing_b or inputs.get(129, 0.5) > 1: expected[3:6] = [.3]*3
+        if inputs.get(123, 0.5) < 0: expected[:3] = [.2]*3
+        if inputs.get(129, 0.5) > 1: expected[3:6] = [.3]*3
         if not all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result,expected)):
             raise AssertionError(f'{name}: {result} != {expected}')
         count += 1
@@ -125,12 +136,12 @@ try:
                 a=[v*exposure*attenuation for v in color]; b=[v*exposure for v in color]
                 check('scaled shadow',a,b)
                 check('reverse scaled shadow',b,a)
-    check('blue siren',[.2,.45,.2],[.2,.55,1.],True)
-    check('red siren',[.2,.45,.2],[1.,.2,.2],True)
+    check('blue siren',[.2,.45,.2],[.2,.55,1.])
+    check('red siren',[.2,.45,.2],[1.,.2,.2])
     # Conflicts missed by 0.70 but admitted by 0.25. Test both temporal directions.
     for color in [[.25,.55,.47],[.47,.55,.25]]:
-        check('moderate siren',[.2,.45,.2],color,siren_mode)
-        check('moderate trailing siren',color,[.2,.45,.2],siren_mode)
+        check('moderate siren',[.2,.45,.2],color)
+        check('moderate trailing siren',color,[.2,.45,.2])
     check('small chromatic fluctuation',[.2,.45,.2],[.2,.45,.35])
     # Approximate brightness scaling: preserve mild chromatic noise on colored ground.
     check('near scalar brick',[.40,.30,.275],[.8,.61,.55])
@@ -138,12 +149,12 @@ try:
     check('missing past',[.2,.45,.2],[.2,.55,1.],missing_a=1)
     check('missing current',[.2,.45,.2],[.2,.55,1.],missing_b=1)
     # Candidate Conflict Firewall:
-    # Under chromatic conflict passing shadow veto, geometric warp is bypassed.
-    # Stock DLSS-G candidates are preserved untouched (no candidate overwrite):
+    # Non-shadow chromatic conflicts remain purely warped; confidence does not
+    # weaken or reconcile them in strict shadow-boundary mode.
     result_conflict = execute({125:.2,126:.45,127:.2,131:.2,132:.55,133:1.,148:.7,149:.3})
-    assert all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result_conflict,[.2,.2,.2,.3,.3,.3,.7,.8]))
+    assert all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result_conflict,[.2,.45,.2,.2,.55,1.,.7,.8]))
     result_conflict2 = execute({125:.2,126:.45,127:.2,131:.2,132:.55,133:1.,148:.3,149:.7})
-    assert all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result_conflict2,[.2,.2,.2,.3,.3,.3,.7,.8]))
+    assert all(math.isclose(x,y,abs_tol=3e-6) for x,y in zip(result_conflict2,[.2,.45,.2,.2,.55,1.,.7,.8]))
     print(f'GPU_SHADOW_SCALE_OK (siren_mode={siren_mode}, diagnostic={diagnostic}): {count+2} cases; exported experimental policy executed')
 finally:
     if src.value: call('cuMemFree_v2',src)

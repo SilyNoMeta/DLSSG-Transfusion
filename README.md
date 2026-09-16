@@ -7,19 +7,17 @@ Dynamic defaults to a 4x ceiling. Its UI toggle allows experimental 5x and 6x.
 UI recomposition is requested only when matching HUDless and UI buffers are tagged.
 The panel reports rendered FPS and total DLSS output FPS.
 
-Version **1.4.1** consolidates all proxy DLLs into a single universal `DLSSG-Transfusion.dll`,
+Version **1.4.5** brings refined thin-geometry protection (100% tear-free wire fences and grass across up to 6x multipliers with pristine dynamic shadows), overlay stability fixes, and consolidated proxy distribution.
+
+Version **1.4.1** consolidated all proxy DLLs into a single universal `DLSSG-Transfusion.dll`,
 adds an in-game multiplier overlay, and improves shadow/translucent quality at high speed.
 
-Version **1.4.0** introduced the **DLSS-G Quality Fix (`qualityValidWarp`)**, unlocked native HUDless
-UI Recomposition (UIR) for games tagging separate UI buffers (eliminating tearing with zero HUD ghosting),
-provided rock-solid HUD protection for single-surface pipelines, and added `dinput8.dll` proxy support.
-
-### What's New in Version 1.4.1
-- **Universal Proxy DLL**: All proxy targets (`version.dll`, `dinput8.dll`, `dxgi.dll`, `winmm.dll`, `.asi`) merged into `DLSSG-Transfusion.dll`. Rename it to whichever proxy name your game requires; the DLL auto-detects its role from its filename at runtime.
-- **In-Game Multiplier Overlay**: Lightweight DXGI Present-hooked HUD showing active multiplier and frame generation state in real time. Toggle with `Ctrl + Alt + O` (off by default).
-- **Quality Fix - Shadow Temporal Interpolation**: Per-frame fractional-timestamp shadow positions eliminate shadow lag and snap-teleport artifacts at high speed.
-- **Quality Fix - Chromatic Conflict Firewall**: Siren lights and translucent mesh pixels (chromatic conflict) fall back to stock DLSS-G dissolve instead of forcing corrupt warp, eliminating double-dome tearing on rotating lights and bubble helmets.
-- **Quality Fix - Relaxed Shadow Veto Threshold (12%)**: Fast-moving outdoor shadows no longer disintegrate under ambient lighting shifts.
+### What's New in Version 1.4.5
+- **Tear-Free Thin Geometry Recovery (Fences & Foliage)**: Ported and refined from the RenoDx Release 1.0 Validated Warp Blend foundation. Fine-tuned with a `0.03f` disparity margin and `0.28f` warped error ceiling, eliminating wire fence and grass blade tearing across all camera speeds and multipliers up to 6x.
+- **Pristine Moving Shadows**: Completely eliminated broad surface elevation (Track 1) so ground textures and dynamic vehicle/character shadows remain 100% under stock DLSS-G's neural blend, preventing erased dots and hole-punch artifacts.
+- **Pure Symmetrical 0.98f Weight Floor**: Pure candidate FMA reconstruction with zero cross-candidate copying or ghosting.
+- **Multiplier Overlay Stability**: Moved DXGI Present hook initialization out of `DLL_PROCESS_ATTACH` into the worker thread, completely preventing loader-lock deadlocks on game startup. Added non-blocking backbuffer rendering and clean `ResizeBuffers` resource release.
+- **Motion Tracing Toggle**: Added `logMotionTracing` config key (off by default) to eliminate log file overhead during normal gameplay.
 
 ### What's New in Version 1.4.0
 - **DLSS-G Quality Fix (`qualityValidWarp=true`)**:

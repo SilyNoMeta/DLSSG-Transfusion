@@ -92,6 +92,8 @@ function(setup_mod_target TARGET_NAME OUTPUT_BASENAME DEF_FILE EXTENSION)
         PREFIX ""
         SUFFIX "${EXTENSION}"
         OUTPUT_NAME "${OUTPUT_BASENAME}"
+        PDB_NAME "${TARGET_NAME}"
+        COMPILE_PDB_NAME "${TARGET_NAME}"
     )
     add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/dist"

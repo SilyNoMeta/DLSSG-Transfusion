@@ -48,6 +48,7 @@ inline int __stdcall HookCreate(void* device, void* module, const char* name, vo
 {
     const auto original = createOriginal.load(std::memory_order_acquire);
     const int result = original(device, module, name, function);
+    if (!gConfigLogMotionTracing.load(std::memory_order_relaxed)) return result;
     void* handle = nullptr;
     if (result != 0 || !Read(function, &handle, sizeof(handle)) || !handle) return result;
     const uint32_t kind = Identify(name);
@@ -72,6 +73,7 @@ template<typename T> inline T Field(const std::array<uint8_t, 160>& bytes, size_
 }
 inline void Observe(const ChainEntry& entry, uint32_t index, uint32_t count)
 {
+    if (!gConfigLogMotionTracing.load(std::memory_order_relaxed)) return;
     uint32_t kind = 0;
     uint64_t call = 0;
     {
@@ -116,6 +118,8 @@ inline int __stdcall HookLaunch(void* commandList, const void* entries, uint32_t
     if (inside) return original(commandList, entries, count);
     inside = true;
     struct Exit { bool& flag; ~Exit() { flag = false; } } exit{inside};
+    if (!gConfigLogMotionTracing.load(std::memory_order_relaxed))
+        return original(commandList, entries, count);
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true)) Log(L"[KERNEL-TRACE] chain dispatch observed count=%u", count);
     if (entries && count <= 64)
@@ -129,6 +133,7 @@ inline int __stdcall HookLaunch(void* commandList, const void* entries, uint32_t
 }
 inline void* Intercept(uint32_t id, void* original)
 {
+    if (!gConfigLogMotionTracing.load(std::memory_order_relaxed)) return original;
     // Log queries before the null check: an unavailable interface is evidence
     // of a different path, not evidence that the resolver was never reached.
     static std::atomic<uint32_t> queryCount{0};

@@ -277,6 +277,7 @@ std::atomic<bool> gConfigDisableMvDilation{false};
 std::atomic<bool> gConfigForceUiRecomposition{false};
 std::atomic<bool> gIsEndfield{false};
 std::atomic<bool> gConfigLogPerformance{false};
+std::atomic<bool> gConfigLogMotionTracing{false};
 
 std::wstring gPerfCsvPath;
 FILE* gPerfCsv = nullptr;
@@ -595,6 +596,7 @@ void LogMotionResourceTags(const sl::ViewportHandle& viewport,
     const sl::ResourceTag* tags, uint32_t numTags, bool frameKnown, uint32_t frame)
 {
     if constexpr (scatter_experiment::kMode != 0) return;
+    if (!gConfigLogMotionTracing.load(std::memory_order_relaxed)) return;
     if (!tags || numTags == 0 || numTags > 1024) return;
     struct Record
     {
@@ -1030,7 +1032,8 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         "  \"disableMenuDetection\": %s,\n"
         "  \"disableMvDilation\": %s,\n"
         "  \"forceUiRecomposition\": %s,\n"
-        "  \"logPerformance\": %s\n"
+        "  \"logPerformance\": %s,\n"
+        "  \"logMotionTracing\": %s\n"
         "}\n",
         control.multiplier,
         control.dynamic ? "dynamic" : "fixed",
@@ -1044,7 +1047,8 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         gConfigDisableMenuDetection.load(std::memory_order_relaxed) ? "true" : "false",
         gConfigDisableMvDilation.load(std::memory_order_relaxed) ? "true" : "false",
         gConfigForceUiRecomposition.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigLogPerformance.load(std::memory_order_relaxed) ? "true" : "false");
+        gConfigLogPerformance.load(std::memory_order_relaxed) ? "true" : "false",
+        gConfigLogMotionTracing.load(std::memory_order_relaxed) ? "true" : "false");
     if (len <= 0) return false;
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -1200,6 +1204,13 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
         && TryParseBoolean(content, "logPerformance", logPerf);
     if (hasPerf) gConfigLogPerformance.store(logPerf, std::memory_order_relaxed);
     else if (missingKeys) missingKeys->push_back("logPerformance");
+
+    size_t motionTraceOffset = 0;
+    bool logMotionTracing = gConfigLogMotionTracing.load(std::memory_order_relaxed);
+    const bool hasMotionTracing = FindJsonValue(content, "logMotionTracing", motionTraceOffset)
+        && TryParseBoolean(content, "logMotionTracing", logMotionTracing);
+    if (hasMotionTracing) gConfigLogMotionTracing.store(logMotionTracing, std::memory_order_relaxed);
+    else if (missingKeys) missingKeys->push_back("logMotionTracing");
 
     control = parsed;
     return true;
@@ -2282,6 +2293,7 @@ void LogMotionInputs(const sl::Constants& values, const wchar_t* route,
     uint32_t viewport, bool dilationOverride)
 {
     if constexpr (scatter_experiment::kMode != 0) return;
+    if (!gConfigLogMotionTracing.load(std::memory_order_relaxed)) return;
     // Observe real gameplay after startup without per-frame logging. This does
     // not read textures, synchronize the GPU, or change any input constants.
     static std::atomic<uint64_t> calls{0};
@@ -4721,6 +4733,14 @@ DWORD WINAPI PatchWorker(void* context)
     }
     gLogReady.store(gLog != nullptr, std::memory_order_release);
 
+    // DXGI and D3D12 initialization may load modules and install detours. Doing
+    // that work from DLL_PROCESS_ATTACH holds the Windows loader lock and can
+    // deadlock engines which initialize graphics on another startup thread.
+    const bool overlayHooksInstalled = multiplier_overlay::Install(
+        &gActualFramesPresented, &gAppliedMultiplier, &gGameFrameGenerationOn,
+        &gFrameGenerationSession, &gActualMultiplierSampleTick);
+    Log(L"Native multiplier overlay hooks installed: %d", overlayHooksInstalled);
+
     const std::wstring mappingName = MfgUnlockObjectName(L"Status", pid);
     HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mappingName.c_str());
     auto* shared = mapping ? static_cast<MfgUnlockStatus*>(
@@ -4768,7 +4788,7 @@ DWORD WINAPI PatchWorker(void* context)
     FILETIME configWriteTime{};
     ReadLastWriteTime(gConfigPath, configWriteTime);
     Log(L"Initial control: mode=%s multiplier=%ux dynamicTarget=%u FPS "
-        L"dynamicExperimental56=%d blackwellTransfusion=%d disableMenuDetection=%d disableMvDilation=%d forceUiRecomposition=%d logPerformance=%d; config: %s",
+        L"dynamicExperimental56=%d blackwellTransfusion=%d disableMenuDetection=%d disableMvDilation=%d forceUiRecomposition=%d logPerformance=%d logMotionTracing=%d; config: %s",
         initialControl.dynamic ? L"dynamic" : L"fixed", initialControl.multiplier,
         initialControl.dynamicTargetFrameRate, initialControl.dynamicExperimental56,
         gConfigBlackwellTransfusion.load(std::memory_order_relaxed),
@@ -4776,6 +4796,7 @@ DWORD WINAPI PatchWorker(void* context)
         gConfigDisableMvDilation.load(std::memory_order_relaxed),
         gConfigForceUiRecomposition.load(std::memory_order_relaxed),
         gConfigLogPerformance.load(std::memory_order_relaxed),
+        gConfigLogMotionTracing.load(std::memory_order_relaxed),
         gConfigPath.c_str());
 
     Log(L"Patch worker started for PID %lu", static_cast<unsigned long>(pid));
@@ -4961,9 +4982,6 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         InstallUiTagHooks();
         InstallInterposerDetours();
     InstallLoadLibraryHooks();
-        multiplier_overlay::Install(&gActualFramesPresented, &gAppliedMultiplier,
-            &gGameFrameGenerationOn, &gFrameGenerationSession,
-            &gActualMultiplierSampleTick);
         RegisterDllNotification();
         HANDLE thread = CreateThread(nullptr, 0, PatchWorker, instance, 0, nullptr);
         if (thread)

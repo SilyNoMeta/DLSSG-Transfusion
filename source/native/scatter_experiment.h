@@ -25,7 +25,7 @@ inline constexpr const char* kName = QUALITY_CAPTURE ? "quality-mode9-candidate-
     : kMode == 5 ? "quality-v4-E1-relaxed-agreement"
     : kMode == 4 ? "quality-v4-D-working-1080p"
     : kMode == 3 ? "quality-v4-C-center-depth"
-    : kMode == 2 ? "quality-v4-B-spread" : "v1.4.0-pure-warp";
+    : kMode == 2 ? "quality-v4-B-spread" : "quality-strict-shadow-stock";
 inline constexpr const char* kPolicy = kMode == 1 ? "A: squared motion-error threshold x0.5"
     : kMode == 2 ? "B: neighborhood expansion cap 5->3"
     : kMode == 7 ? "E3: pure 100% warped motion"
