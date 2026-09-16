@@ -66,61 +66,19 @@ abs.f32 %qf8, %qf8;
 add.f32 %qf6, %qf6, %qf7;
 add.f32 %qf6, %qf6, %qf8;
 
-// Warped L1 difference (%qf9 = |Warped0 - Warped1|)
-sub.f32 %qf9, %f125, %f131;
-sub.f32 %qf10, %f126, %f132;
-sub.f32 %qf11, %f127, %f133;
-abs.f32 %qf9, %qf9;
-abs.f32 %qf10, %qf10;
-abs.f32 %qf11, %qf11;
-add.f32 %qf9, %qf9, %qf10;
-add.f32 %qf9, %qf9, %qf11;
+// Motion detector: Scene is in motion (UnwarpedDiff > 0.03f = 0f3CF5C28F).
+// Fully preserves static HUD & UI elements (HUD does not move between frames, UnwarpedDiff == 0.0f).
+setp.gt.f32 %qv2, %qf6, 0f3CF5C28F;
+and.pred %qv2, %qv2, %qv3;
+and.pred %qv0, %qv0, %qv2;
+and.pred %qv1, %qv1, %qv2;
 
-// Track 1: High-contrast rigid geometry recovery (Airplane passenger windows, cockpit frames, structural edges)
-// Recovers repetitive geometry suffering from optical flow aperture confusion.
-// Requires high temporal contrast (UnwarpedDiff > 0.80f = 0f3F4CCCCD) and tight warp lock (WarpedDiff < 0.15f = 0f3E19999A).
-// Asphalt road never triggers (road UnwarpedDiff is ~0.25-0.35f << 0.80f).
-setp.gt.f32 %qv6, %qf6, 0f3F4CCCCD;
-setp.lt.f32 %qv2, %qf9, 0f3E19999A;
-and.pred %qv6, %qv6, %qv2;
-
-// Track 2: Thin geometry recovery (WarpedDiff < 0.24f = 0f3E75C28F, disparity margin >= 0.05f = 0f3D4CCCCD)
-// Solid foliage & wire mesh protection: retains solid fence wires/grass
-add.f32 %qf10, %qf9, 0f3D4CCCCD;
-setp.lt.f32 %qv4, %qf10, %qf6;
-setp.lt.f32 %qv2, %qf9, 0f3E75C28F;
-and.pred %qv4, %qv4, %qv2;
-
-// Combine Track 1 (airplane windows) and Track 2 (fence wires/grass) into solid 0.98f floor
-or.pred %qv4, %qv4, %qv6;
-and.pred %qv4, %qv4, %qv3;
-
-// Track 3: Fence gap background motion recovery (Candidate-independent motion elevation)
-// Rescues background seen through fence gaps (ocean, bridge, sky) from falling back to 23 FPS unwarped stutter.
-// Evaluates candidates INDEPENDENTLY: elevates the visible background candidate while rejecting occluded wire edges.
-// Requires scene motion (UnwarpedDiff > 0.08f = 0f3DA3D70A) and candidate confidence (weight >= 0.15f = 0f3E19999A).
-// Fully preserves static HUD (HUD has UnwarpedDiff == 0.0f).
-setp.gt.f32 %qv2, %qf6, 0f3DA3D70A;
-
-setp.ge.f32 %qv5, %f148, 0f3E19999A;
-and.pred %qv5, %qv5, %qv2;
-or.pred %qv5, %qv5, %qv4;
-and.pred %qv0, %qv0, %qv5;
-
-setp.ge.f32 %qv6, %f149, 0f3E19999A;
-and.pred %qv6, %qv6, %qv2;
-or.pred %qv6, %qv6, %qv4;
-and.pred %qv1, %qv1, %qv6;
-
-// Target floors:
-// Solid geometry (%qv4: wires, grass, airplane windows): 0.98f (0f3F7AE148)
-// Gap background: 0.85f (0f3F59999A) -> matches unobstructed 138 FPS background motion
-selp.f32 %qf0, 0f3F7AE148, 0f3F59999A, %qv4;
-max.f32 %qf0, %f148, %qf0;
+// Full geometric motion warp floor (0.98f = 0f3F7AE148)
+// Eliminates fence tearing, eliminates background gap lag, locks airplane windows, zero HUD ghosting.
+max.f32 %qf0, %f148, 0f3F7AE148;
 min.f32 %qf0, %qf0, 0f3F800000;
 
-selp.f32 %qf1, 0f3F7AE148, 0f3F59999A, %qv4;
-max.f32 %qf1, %f149, %qf1;
+max.f32 %qf1, %f149, 0f3F7AE148;
 min.f32 %qf1, %qf1, 0f3F800000;
 
 sub.f32 %qf2, %f125, %f115;
