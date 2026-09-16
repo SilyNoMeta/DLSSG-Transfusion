@@ -95,15 +95,20 @@ and.pred %qv4, %qv4, %qv2;
 or.pred %qv4, %qv4, %qv6;
 and.pred %qv4, %qv4, %qv3;
 
-// Track 3: Fence gap background motion recovery
-// Rescues background seen through wire fence gaps from falling back to unwarped judder.
-// Potent tuning for 6x cadence and 1080p resolution:
-// Sensitivity (UnwarpedDiff > 0.02f = 0f3CA3D70A), wider warp margin (WarpedDiff < 0.65f = 0f3F266666).
+// Track 3: Fence gap background motion recovery (Tiered anti-smear calibration)
+// Sensitivity (UnwarpedDiff > 0.02f = 0f3CA3D70A) and bounded error (WarpedDiff < 0.38f = 0f3EC28F5C)
+// Prevents wire edge smearing by cutting off at 0.38f.
 // Fully preserves static HUD (HUD has UnwarpedDiff == 0.0f).
 setp.gt.f32 %qv5, %qf6, 0f3CA3D70A;
-setp.lt.f32 %qv2, %qf9, 0f3F266666;
+setp.lt.f32 %qv2, %qf9, 0f3EC28F5C;
 and.pred %qv5, %qv5, %qv2;
 and.pred %qv5, %qv5, %qv3;
+
+// Tiered background floor:
+// If clean background (WarpedDiff < 0.20f = 0f3E4CCCCD), use 0.84f (0f3F570A3D)
+// If near-wire boundary (WarpedDiff >= 0.20f), use 0.68f (0f3F2E147B) to prevent wire smearing
+setp.lt.f32 %qv6, %qf9, 0f3E4CCCCD;
+selp.f32 %qf1, 0f3F570A3D, 0f3F2E147B, %qv6;
 
 // Combined trigger for elevation
 or.pred %qv2, %qv4, %qv5;
@@ -111,13 +116,13 @@ and.pred %qv0, %qv0, %qv2;
 and.pred %qv1, %qv1, %qv2;
 
 // Calibrated confidence floors:
-// Thin geometry (%qv4: wires, grass, airplane windows): 0.98f (0f3F7AE148)
-// Gap background (%qv5): 0.88f (0f3F6147AE) -> potent camera motion interpolation for 6x 1080p
-selp.f32 %qf0, 0f3F7AE148, 0f3F6147AE, %qv4;
+// Solid geometry (%qv4: wires, grass, airplane windows): 0.98f (0f3F7AE148)
+// Gap background (%qv5): tiered floor in %qf1 (0.84f clean / 0.68f near-wire)
+selp.f32 %qf0, 0f3F7AE148, %qf1, %qv4;
 max.f32 %qf0, %f148, %qf0;
 min.f32 %qf0, %qf0, 0f3F800000;
 
-selp.f32 %qf1, 0f3F7AE148, 0f3F6147AE, %qv4;
+selp.f32 %qf1, 0f3F7AE148, %qf1, %qv4;
 max.f32 %qf1, %f149, %qf1;
 min.f32 %qf1, %qf1, 0f3F800000;
 
