@@ -14,6 +14,7 @@ inline constexpr std::string_view kRegisters = R"ptx(
 )ptx";
 
 inline constexpr std::string_view kPolicy = R"ptx(
+// QUALITY_VALID_WARP_V4
 // MFGUNLOCK_VALIDATED_WARP_BLEND_V1_TUNED
 cvt.rn.f32.u32 %qf0, %r10;
 cvt.rn.f32.u32 %qf1, %r11;
@@ -95,6 +96,14 @@ sub.f32 %qf4, %f133, %f121;
 @%qv1 fma.rn.f32 %f41, %qf1, %qf4, %f121;
 )ptx";
 
+inline bool ReplaceOnce(std::string& text, const std::string_view from, const std::string_view to)
+{
+    const auto pos = text.find(from);
+    if (pos == std::string::npos || text.find(from, pos + from.size()) != std::string::npos) return false;
+    text.replace(pos, from.size(), to);
+    return true;
+}
+
 inline bool Patch(std::string& ptx, std::string& why)
 {
     std::string normalized = ptx;
@@ -118,8 +127,120 @@ inline bool Patch(std::string& ptx, std::string& why)
 
     normalized.insert(site, kPolicy);
     normalized.insert(registers, kRegisters);
+
+    // Fast reciprocal for UI chroma average (div by 3.0f -> mul by 0.33333334f)
+    ReplaceOnce(normalized,
+        "mov.f32 %f193, 0f40400000;\n"
+        "div.approx.ftz.f32 %f194, %f192, %f193;",
+        "mul.ftz.f32 %f194, %f192, 0f3EAAAAAB;");
+
+    // Full-resolution tensor output: bypass 8x redundant SFU divisions by 1.0f
+    ReplaceOnce(normalized,
+        "mov.f32 %f537, 0f3F800000;\n"
+        "div.approx.ftz.f32 %f529, %f39, %f537;\n"
+        "div.approx.ftz.f32 %f530, %f38, %f537;\n"
+        "div.approx.ftz.f32 %f531, %f37, %f537;\n"
+        "div.approx.ftz.f32 %f532, %f36, %f537;\n"
+        "div.approx.ftz.f32 %f533, %f43, %f537;\n"
+        "div.approx.ftz.f32 %f534, %f42, %f537;\n"
+        "div.approx.ftz.f32 %f535, %f41, %f537;\n"
+        "div.approx.ftz.f32 %f536, %f40, %f537;",
+        "mov.f32 %f529, %f39;\n"
+        "mov.f32 %f530, %f38;\n"
+        "mov.f32 %f531, %f37;\n"
+        "mov.f32 %f532, %f36;\n"
+        "mov.f32 %f533, %f43;\n"
+        "mov.f32 %f534, %f42;\n"
+        "mov.f32 %f535, %f41;\n"
+        "mov.f32 %f536, %f40;");
+
+    // Downsampling Mode 2: replace 8x div by 4.0f with mul by 0.25f (0f3E800000)
+    ReplaceOnce(normalized,
+        "mov.f32 %f528, 0f40800000;\n"
+        "div.approx.ftz.f32 %f520, %f44, %f528;\n"
+        "div.approx.ftz.f32 %f521, %f45, %f528;\n"
+        "div.approx.ftz.f32 %f522, %f46, %f528;\n"
+        "div.approx.ftz.f32 %f523, %f47, %f528;\n"
+        "div.approx.ftz.f32 %f524, %f48, %f528;\n"
+        "div.approx.ftz.f32 %f525, %f49, %f528;\n"
+        "div.approx.ftz.f32 %f526, %f50, %f528;\n"
+        "div.approx.ftz.f32 %f527, %f51, %f528;",
+        "mov.f32 %f528, 0f3E800000;\n"
+        "mul.ftz.f32 %f520, %f44, %f528;\n"
+        "mul.ftz.f32 %f521, %f45, %f528;\n"
+        "mul.ftz.f32 %f522, %f46, %f528;\n"
+        "mul.ftz.f32 %f523, %f47, %f528;\n"
+        "mul.ftz.f32 %f524, %f48, %f528;\n"
+        "mul.ftz.f32 %f525, %f49, %f528;\n"
+        "mul.ftz.f32 %f526, %f50, %f528;\n"
+        "mul.ftz.f32 %f527, %f51, %f528;");
+
+    // Downsampling Mode 4: replace 8x div by 16.0f with mul by 0.0625f (0f3D800000)
+    ReplaceOnce(normalized,
+        "mov.f32 %f495, 0f41800000;\n"
+        "div.approx.ftz.f32 %f487, %f52, %f495;\n"
+        "div.approx.ftz.f32 %f488, %f53, %f495;\n"
+        "div.approx.ftz.f32 %f489, %f54, %f495;\n"
+        "div.approx.ftz.f32 %f490, %f55, %f495;\n"
+        "div.approx.ftz.f32 %f491, %f56, %f495;\n"
+        "div.approx.ftz.f32 %f492, %f57, %f495;\n"
+        "div.approx.ftz.f32 %f493, %f58, %f495;\n"
+        "div.approx.ftz.f32 %f494, %f59, %f495;",
+        "mov.f32 %f495, 0f3D800000;\n"
+        "mul.ftz.f32 %f487, %f52, %f495;\n"
+        "mul.ftz.f32 %f488, %f53, %f495;\n"
+        "mul.ftz.f32 %f489, %f54, %f495;\n"
+        "mul.ftz.f32 %f490, %f55, %f495;\n"
+        "mul.ftz.f32 %f491, %f56, %f495;\n"
+        "mul.ftz.f32 %f492, %f57, %f495;\n"
+        "mul.ftz.f32 %f493, %f58, %f495;\n"
+        "mul.ftz.f32 %f494, %f59, %f495;");
+
+    // Downsampling Mode 8: replace 8x div by 64.0f with mul by 0.015625f (0f3C800000)
+    ReplaceOnce(normalized,
+        "mov.f32 %f430, 0f42800000;\n"
+        "div.approx.ftz.f32 %f422, %f68, %f430;\n"
+        "div.approx.ftz.f32 %f423, %f69, %f430;\n"
+        "div.approx.ftz.f32 %f424, %f70, %f430;\n"
+        "div.approx.ftz.f32 %f425, %f71, %f430;\n"
+        "div.approx.ftz.f32 %f426, %f72, %f430;\n"
+        "div.approx.ftz.f32 %f427, %f73, %f430;\n"
+        "div.approx.ftz.f32 %f428, %f74, %f430;\n"
+        "div.approx.ftz.f32 %f429, %f75, %f430;",
+        "mov.f32 %f430, 0f3C800000;\n"
+        "mul.ftz.f32 %f422, %f68, %f430;\n"
+        "mul.ftz.f32 %f423, %f69, %f430;\n"
+        "mul.ftz.f32 %f424, %f70, %f430;\n"
+        "mul.ftz.f32 %f425, %f71, %f430;\n"
+        "mul.ftz.f32 %f426, %f72, %f430;\n"
+        "mul.ftz.f32 %f427, %f73, %f430;\n"
+        "mul.ftz.f32 %f428, %f74, %f430;\n"
+        "mul.ftz.f32 %f429, %f75, %f430;");
+
+    // Downsampling Mode 16: replace 8x div by 256.0f with mul by 0.00390625f (0f3B800000)
+    ReplaceOnce(normalized,
+        "mov.f32 %f333, 0f43800000;\n"
+        "div.approx.ftz.f32 %f325, %f84, %f333;\n"
+        "div.approx.ftz.f32 %f326, %f85, %f333;\n"
+        "div.approx.ftz.f32 %f327, %f86, %f333;\n"
+        "div.approx.ftz.f32 %f328, %f87, %f333;\n"
+        "div.approx.ftz.f32 %f329, %f88, %f333;\n"
+        "div.approx.ftz.f32 %f330, %f89, %f333;\n"
+        "div.approx.ftz.f32 %f331, %f90, %f333;\n"
+        "div.approx.ftz.f32 %f332, %f91, %f333;",
+        "mov.f32 %f333, 0f3B800000;\n"
+        "mul.ftz.f32 %f325, %f84, %f333;\n"
+        "mul.ftz.f32 %f326, %f85, %f333;\n"
+        "mul.ftz.f32 %f327, %f86, %f333;\n"
+        "mul.ftz.f32 %f328, %f87, %f333;\n"
+        "mul.ftz.f32 %f329, %f88, %f333;\n"
+        "mul.ftz.f32 %f330, %f89, %f333;\n"
+        "mul.ftz.f32 %f331, %f90, %f333;\n"
+        "mul.ftz.f32 %f332, %f91, %f333;");
+
     ptx = std::move(normalized);
-    why = "precision-tuned thin-geometry protection applied (fine shadows protected, fences solid)";
+    why = "precision-tuned thin-geometry protection and SFU reciprocal optimizations applied";
     return true;
 }
 }
+
