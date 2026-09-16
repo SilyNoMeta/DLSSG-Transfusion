@@ -272,7 +272,7 @@ std::atomic<bool> gConfigForceOta{false};
 std::atomic<bool> gConfigPatchFlipMetering{false};
 std::atomic<bool> gConfigBlackwellTransfusion{true};
 std::atomic<bool> gConfigQualityFix{true};
-std::atomic<bool> gConfigDisableMenuDetection{true};
+std::atomic<bool> gConfigDisableMenuDetection{false};
 std::atomic<bool> gConfigDisableMvDilation{false};
 std::atomic<bool> gConfigForceUiRecomposition{false};
 std::atomic<bool> gIsEndfield{false};

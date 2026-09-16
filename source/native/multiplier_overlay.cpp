@@ -265,6 +265,7 @@ void ObserveSuccessfulPresent(IDXGISwapChain* swapChain, HRESULT result)
 
 void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
 {
+    if(!swapChain || (presentFlags & DXGI_PRESENT_TEST) != 0) return;
     if(!gActual || !gFgOn) return;
     const bool fgOn=gFgOn->load(std::memory_order_relaxed);
     // Present must never wait behind overlay bookkeeping. RE Engine can present
@@ -285,7 +286,7 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     }
     LARGE_INTEGER now{};
     static const int64_t frequency=[](){LARGE_INTEGER value{};return QueryPerformanceFrequency(&value)?value.QuadPart:0;}();
-    if((presentFlags & DXGI_PRESENT_TEST)==0 && frequency>0 && QueryPerformanceCounter(&now)) {
+    if(frequency>0 && QueryPerformanceCounter(&now)) {
         if(!c.fpsWindowStart.QuadPart) c.fpsWindowStart=now;
         ++c.presentsInWindow;
         const uint64_t elapsed=static_cast<uint64_t>(now.QuadPart-c.fpsWindowStart.QuadPart);
@@ -302,18 +303,19 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     if(!c.fgSessionReadyTick || GetTickCount64()-c.fgSessionReadyTick<1500) return;
     const uint64_t sampleAge=gSampleTick ? GetTickCount64()-gSampleTick->load(std::memory_order_acquire) : UINT64_MAX;
     uint32_t mult=gActual->load(std::memory_order_relaxed);
-    // Turning FG off legitimately publishes zero. On re-enable, show the last
-    // accepted setting immediately instead of waiting for the first state query.
-    if((mult<2 || sampleAge>2500) && gApplied) mult=gApplied->load(std::memory_order_relaxed);
+    // If telemetry explicitly reports 1x, FG is currently bypassed/suspended (e.g. loading screen or menu)
+    if(mult==1) return;
+    // On startup before the first state query has completed, show the applied setting
+    if(mult==0 && sampleAge>2500 && gApplied) mult=gApplied->load(std::memory_order_relaxed);
     if(mult<2 || mult>6) return;
     // Resource creation and shader compilation are never allowed on Present.
     // A short grace period also keeps overlay submissions out of engine and
     // Streamline startup synchronization.
     if(!c.ready || GetTickCount64()-c.readyTick<1500) return;
-    ComPtr<IDXGISwapChain3> sc3; if(FAILED(swapChain->QueryInterface(IID_PPV_ARGS(&sc3)))) return; const UINT i=sc3->GetCurrentBackBufferIndex(); if(i>=c.count) return;
+    ComPtr<IDXGISwapChain3> sc3; if(FAILED(swapChain->QueryInterface(IID_PPV_ARGS(&sc3)))) return; const UINT i=sc3->GetCurrentBackBufferIndex(); if(i>=c.count || !c.buffers[i]) return;
     // Avoid formatting and rebuilding glyph geometry when this backbuffer is
     // still occupied by the preceding overlay submission.
-    if(c.fenceValues[i] && c.fence->GetCompletedValue()<c.fenceValues[i]) return;
+    if(!c.fence || (c.fenceValues[i] && c.fence->GetCompletedValue()<c.fenceValues[i])) return;
     const uint32_t generatedMilli=c.presentedFpsMilli;
     const uint32_t generatedFps=(generatedMilli+500u)/1000u;
     const uint32_t baseFps=(generatedMilli+mult*500u)/(mult*1000u);
@@ -322,7 +324,7 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     const float scale=2.f, advance=12.f;
     float textWidth=0.f;
     for(const char* p=label;*p;++p) textWidth+=(*p==' ' ? 6.f : advance);
-    const auto d=c.buffers[i]->GetDesc(); auto& vertices=c.vertices; vertices.clear();
+    const auto d=c.buffers[i]->GetDesc(); if(d.Width==0 || d.Height==0) return; auto& vertices=c.vertices; vertices.clear();
     const float panelW=textWidth+8.f, panelH=19.f, x=10.f, y=10.f;
     AddRect(vertices,x,y,x+panelW,y+panelH,float(d.Width),float(d.Height),0.f,0.f,0.f,.38f);
     float glyphX=x+4.f;
@@ -370,9 +372,11 @@ HRESULT STDMETHODCALLTYPE HookResize(IDXGISwapChain* s,UINT a,UINT b,UINT c,DXGI
         if(i==gContexts.end()) return gResizeBuffers(s,a,b,c,d,e);
         Context& old=i->second;
         for(UINT64 value:old.fenceValues) {
-            if(value && old.fence->GetCompletedValue()<value) {
-                old.fence->SetEventOnCompletion(value,old.fenceEvent);
-                WaitForSingleObject(old.fenceEvent,1000);
+            if(value && old.fence && old.fence->GetCompletedValue()<value) {
+                if(old.fenceEvent) {
+                    old.fence->SetEventOnCompletion(value,old.fenceEvent);
+                    WaitForSingleObject(old.fenceEvent,1000);
+                }
             }
         }
         queue=old.queue;
