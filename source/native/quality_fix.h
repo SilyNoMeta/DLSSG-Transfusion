@@ -77,39 +77,38 @@ add.f32 %qf9, %qf9, %qf10;
 add.f32 %qf9, %qf9, %qf11;
 
 // Track 2: Thin geometry recovery (WarpedDiff < 0.24f = 0f3E75C28F, disparity margin >= 0.05f = 0f3D4CCCCD)
-// Solid foliage & wire mesh protection: retains solid fence wires/grass while firmly rejecting disoccluded background dragging.
+// Solid foliage & wire mesh protection: retains solid fence wires/grass
 add.f32 %qf10, %qf9, 0f3D4CCCCD;
 setp.lt.f32 %qv4, %qf10, %qf6;
 setp.lt.f32 %qv2, %qf9, 0f3E75C28F;
 and.pred %qv4, %qv4, %qv2;
 and.pred %qv4, %qv4, %qv3;
 
-// Gap background protection: Wire/grass geometry must be dark in BOTH candidates (RGB sum < 1.25f = 0f3FA00000).
-// Prevents daylight backgrounds (sky, sea, sand, distant ground) seen through fence/grass gaps from lagging.
-abs.f32 %qf10, %f125;
-abs.f32 %qf11, %f126;
-add.f32 %qf10, %qf10, %qf11;
-abs.f32 %qf11, %f127;
-add.f32 %qf10, %qf10, %qf11;
-setp.lt.f32 %qv2, %qf10, 0f3FA00000;
-and.pred %qv4, %qv4, %qv2;
-abs.f32 %qf10, %f131;
-abs.f32 %qf11, %f132;
-add.f32 %qf10, %qf10, %qf11;
-abs.f32 %qf11, %f133;
-add.f32 %qf10, %qf10, %qf11;
-setp.lt.f32 %qv2, %qf10, 0f3FA00000;
-and.pred %qv4, %qv4, %qv2;
+// Track 3: Fence gap background motion recovery
+// Rescues background seen through wire fence gaps from falling back to unwarped judder.
+// Requires valid motion (UnwarpedDiff > 0.08f = 0f3DA3D70A) and bounded warp error (WarpedDiff < 0.45f = 0f3EE66666).
+// Fully preserves static HUD (HUD has UnwarpedDiff == 0.0f).
+setp.gt.f32 %qv5, %qf6, 0f3DA3D70A;
+setp.lt.f32 %qv2, %qf9, 0f3EE66666;
+and.pred %qv5, %qv5, %qv2;
+and.pred %qv5, %qv5, %qv3;
 
-// Apply thin geometry elevation (%qv4)
-and.pred %qv0, %qv0, %qv4;
-and.pred %qv1, %qv1, %qv4;
+// Combined trigger for elevation
+or.pred %qv2, %qv4, %qv5;
+and.pred %qv0, %qv0, %qv2;
+and.pred %qv1, %qv1, %qv2;
 
-// Weight floor: 0.98f (0f3F7AE148) guarantees 100% solid, tear-free fence wires
-max.f32 %qf0, %f148, 0f3F7AE148;
+// Calibrated confidence floors:
+// Thin geometry (%qv4): 0.98f (0f3F7AE148) -> 100% solid, tear-free fence wires
+// Gap background (%qv5): 0.55f (0f3F0CCCCD) -> smooth camera motion interpolation, zero stutter/lag
+selp.f32 %qf0, 0f3F7AE148, 0f3F0CCCCD, %qv4;
+max.f32 %qf0, %f148, %qf0;
 min.f32 %qf0, %qf0, 0f3F800000;
-max.f32 %qf1, %f149, 0f3F7AE148;
+
+selp.f32 %qf1, 0f3F7AE148, 0f3F0CCCCD, %qv4;
+max.f32 %qf1, %f149, %qf1;
 min.f32 %qf1, %qf1, 0f3F800000;
+
 sub.f32 %qf2, %f125, %f115;
 sub.f32 %qf3, %f126, %f116;
 sub.f32 %qf4, %f127, %f117;
