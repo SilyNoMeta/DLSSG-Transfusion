@@ -86,9 +86,9 @@ and.pred %qv4, %qv4, %qv3;
 
 // Track 3: Fence gap background motion recovery
 // Rescues background seen through wire fence gaps from falling back to unwarped judder.
-// Requires valid motion (UnwarpedDiff > 0.08f = 0f3DA3D70A) and bounded warp error (WarpedDiff < 0.45f = 0f3EE66666).
+// Requires valid motion (UnwarpedDiff > 0.05f = 0f3D4CCCCD) and bounded warp error (WarpedDiff < 0.45f = 0f3EE66666).
 // Fully preserves static HUD (HUD has UnwarpedDiff == 0.0f).
-setp.gt.f32 %qv5, %qf6, 0f3DA3D70A;
+setp.gt.f32 %qv5, %qf6, 0f3D4CCCCD;
 setp.lt.f32 %qv2, %qf9, 0f3EE66666;
 and.pred %qv5, %qv5, %qv2;
 and.pred %qv5, %qv5, %qv3;
@@ -100,12 +100,12 @@ and.pred %qv1, %qv1, %qv2;
 
 // Calibrated confidence floors:
 // Thin geometry (%qv4): 0.98f (0f3F7AE148) -> 100% solid, tear-free fence wires
-// Gap background (%qv5): 0.55f (0f3F0CCCCD) -> smooth camera motion interpolation, zero stutter/lag
-selp.f32 %qf0, 0f3F7AE148, 0f3F0CCCCD, %qv4;
+// Gap background (%qv5): 0.72f (0f3F3851EC) -> smooth camera motion interpolation up to 6x, zero stutter/lag
+selp.f32 %qf0, 0f3F7AE148, 0f3F3851EC, %qv4;
 max.f32 %qf0, %f148, %qf0;
 min.f32 %qf0, %qf0, 0f3F800000;
 
-selp.f32 %qf1, 0f3F7AE148, 0f3F0CCCCD, %qv4;
+selp.f32 %qf1, 0f3F7AE148, 0f3F3851EC, %qv4;
 max.f32 %qf1, %f149, %qf1;
 min.f32 %qf1, %qf1, 0f3F800000;
 
