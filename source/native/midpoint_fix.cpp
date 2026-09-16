@@ -411,13 +411,21 @@ inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
         const bool patched = quality_fix::Patch(ptx_text, quality_status);
         Log(L"Quality PTX preparation: %hs (patched=%d)", quality_status.c_str(), patched);
     }
-    if (kernel_name && std::strcmp(kernel_name, "Kernel_EstimateIntermMvecsScatter") == 0
-        && scatter_experiment::kMode != 0 && scatter_experiment::kMode != 7)
+    if (kernel_name && std::strcmp(kernel_name, "Kernel_EstimateIntermMvecsScatter") == 0)
     {
-        std::string experimentStatus;
-        const bool patched = scatter_experiment::Patch(ptx_text, experimentStatus);
-        Log(L"Scatter experiment: %hs; %hs (prepared=%d)", scatter_experiment::kName, experimentStatus.c_str(), patched);
-        if (!patched) { why = experimentStatus; return false; }
+        if (gQualityFixEnabled.load(std::memory_order_relaxed))
+        {
+            std::string scatter_status;
+            const bool patched = quality_fix::PatchScatter(ptx_text, scatter_status);
+            Log(L"Scatter quality PTX preparation: %hs (patched=%d)", scatter_status.c_str(), patched);
+        }
+        else if (scatter_experiment::kMode != 0 && scatter_experiment::kMode != 7)
+        {
+            std::string experimentStatus;
+            const bool patched = scatter_experiment::Patch(ptx_text, experimentStatus);
+            Log(L"Scatter experiment: %hs; %hs (prepared=%d)", scatter_experiment::kName, experimentStatus.c_str(), patched);
+            if (!patched) { why = experimentStatus; return false; }
+        }
     }
     if (kernel_name && std::strcmp(kernel_name, "Kernel_InputMvecProcessing") == 0
         && scatter_experiment::kMode == 3)

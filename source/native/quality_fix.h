@@ -14,7 +14,7 @@ inline constexpr std::string_view kRegisters = R"ptx(
 )ptx";
 
 inline constexpr std::string_view kPolicy = R"ptx(
-// MFGUNLOCK_VALIDATED_WARP_BLEND_V1_TUNED
+// MFGUNLOCK_VALIDATED_WARP_BLEND_V1_TUNED QUALITY_VALID_WARP_V4
 cvt.rn.f32.u32 %qf0, %r10;
 cvt.rn.f32.u32 %qf1, %r11;
 div.approx.ftz.f32 %qf0, 0f3F000000, %qf0;
@@ -68,8 +68,8 @@ add.f32 %qf6, %qf6, %qf8;
 
 // Motion detector: Scene is in motion (UnwarpedDiff > 0.03f = 0f3CF5C28F).
 // Fully preserves static HUD & UI elements (HUD does not move between frames, UnwarpedDiff == 0.0f).
+// Decoupled: Candidate 0 and Candidate 1 are validated independently so one-sided wire occlusion does not cancel the other candidate.
 setp.gt.f32 %qv2, %qf6, 0f3CF5C28F;
-and.pred %qv2, %qv2, %qv3;
 and.pred %qv0, %qv0, %qv2;
 and.pred %qv1, %qv1, %qv2;
 
@@ -120,6 +120,32 @@ inline bool Patch(std::string& ptx, std::string& why)
     normalized.insert(registers, kRegisters);
     ptx = std::move(normalized);
     why = "precision-tuned thin-geometry protection applied (fine shadows protected, fences solid)";
+    return true;
+}
+
+inline bool PatchScatter(std::string& ptx, std::string& why)
+{
+    std::string normalized = ptx;
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), '\r'), normalized.end());
+    while (!normalized.empty() && normalized.back() == '\0') normalized.pop_back();
+    uint64_t hash = 14695981039346656037ull;
+    for (unsigned char c : normalized) hash = (hash ^ c) * 1099511628211ull;
+    if (normalized.size() != 90731 || hash != 0xb1a2811b29625d41ull)
+    {
+        why = "scatter quality patch skipped: unrecognized IntermMvecsScatter PTX";
+        return false;
+    }
+    const std::string anchor = "ld.param.f32 %f2, [Kernel_EstimateIntermMvecsScatter_param_0+120];\n";
+    const auto site = normalized.find(anchor);
+    if (site == std::string::npos)
+    {
+        why = "scatter quality patch skipped: param+120 load site missing";
+        return false;
+    }
+
+    normalized.insert(site + anchor.size(), "mul.ftz.f32 %f2, %f2, 0f3F000000; // thin-geometry intermediate scatter retention\n");
+    ptx = std::move(normalized);
+    why = "thin-geometry intermediate scatter retention applied (motion divisor x0.5)";
     return true;
 }
 }
