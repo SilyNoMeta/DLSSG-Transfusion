@@ -70,9 +70,29 @@ add.f32 %qf6, %qf6, %qf8;
 // Motion detector: Scene is in motion (UnwarpedDiff > 0.03f = 0f3CF5C28F).
 // Fully preserves static HUD & UI elements (HUD does not move between frames, UnwarpedDiff == 0.0f).
 setp.gt.f32 %qv2, %qf6, 0f3CF5C28F;
-and.pred %qv2, %qv2, %qv3;
-and.pred %qv0, %qv0, %qv2;
-and.pred %qv1, %qv1, %qv2;
+and.pred %qv3, %qv3, %qv2;
+
+// Candidate Agreement Firewall (High-speed Dynamic Shadow Protection):
+// On moving dynamic shadows (e.g. at 138 km/h), surface motion vectors diverge from shadow motion,
+// creating large candidate color disagreement (|Cand0 - Cand1| > 18%).
+// Excluding disagreeing candidates protects dynamic shadows from being erased or flickering,
+// allowing stock DLSS-G neural blending to resolve shadows cleanly while locking true geometry.
+sub.f32 %qf6, %f125, %f131;
+sub.f32 %qf7, %f126, %f132;
+sub.f32 %qf8, %f127, %f133;
+abs.f32 %qf6, %qf6;
+abs.f32 %qf7, %qf7;
+abs.f32 %qf8, %qf8;
+add.f32 %qf6, %qf6, %qf7;
+add.f32 %qf6, %qf6, %qf8;
+max.f32 %qf4, %qf4, %qf5;
+max.f32 %qf4, %qf4, 0f3F800000;
+mul.f32 %qf4, %qf4, 0f3E3851EC;
+setp.le.f32 %qv4, %qf6, %qf4;
+and.pred %qv3, %qv3, %qv4;
+
+and.pred %qv0, %qv0, %qv3;
+and.pred %qv1, %qv1, %qv3;
 
 // Full geometric motion warp floor (0.98f = 0f3F7AE148)
 // Eliminates fence tearing, eliminates background gap lag, locks airplane windows, zero HUD ghosting.
