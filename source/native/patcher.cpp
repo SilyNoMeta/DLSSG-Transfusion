@@ -1244,7 +1244,8 @@ bool ReadControlFile(const std::wstring& path, ControlConfig& control)
 
     std::vector<std::string> missingKeys;
     const bool parsed = TryParseControl(buffer.data(), bytesRead, control, &missingKeys);
-    if (parsed && !missingKeys.empty())
+    const bool hasComments = std::string_view(buffer.data(), bytesRead).find("//") != std::string_view::npos;
+    if (parsed && (!missingKeys.empty() || !hasComments))
     {
         std::string missingList;
         for (size_t i = 0; i < missingKeys.size(); ++i)
@@ -1252,8 +1253,16 @@ bool ReadControlFile(const std::wstring& path, ControlConfig& control)
             if (i > 0) missingList += ", ";
             missingList += missingKeys[i];
         }
-        Log(L"[CONFIG] Config %s was missing %u setting(s): [%hs]; updating file with complete schema",
-            path.c_str(), static_cast<uint32_t>(missingKeys.size()), missingList.c_str());
+        if (!missingKeys.empty())
+        {
+            Log(L"[CONFIG] Config %s was missing %u setting(s): [%hs]; updating file with complete schema and comments",
+                path.c_str(), static_cast<uint32_t>(missingKeys.size()), missingList.c_str());
+        }
+        else
+        {
+            Log(L"[CONFIG] Config %s has no setting descriptions; updating file with descriptive comments",
+                path.c_str());
+        }
         WriteControlFile(path, control);
     }
     return parsed;
