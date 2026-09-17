@@ -18,8 +18,10 @@ inline constexpr std::string_view kPolicy = R"ptx(
 // MFGUNLOCK_VALIDATED_WARP_BLEND_V1_TUNED
 cvt.rn.f32.u32 %qf0, %r10;
 cvt.rn.f32.u32 %qf1, %r11;
-div.approx.ftz.f32 %qf0, 0f3F000000, %qf0;
-div.approx.ftz.f32 %qf1, 0f3F000000, %qf1;
+rcp.approx.ftz.f32 %qf0, %qf0;
+rcp.approx.ftz.f32 %qf1, %qf1;
+mul.ftz.f32 %qf0, %qf0, 0f3F000000;
+mul.ftz.f32 %qf1, %qf1, 0f3F000000;
 sub.ftz.f32 %qf2, 0f3F800000, %qf0;
 sub.ftz.f32 %qf3, 0f3F800000, %qf1;
 setp.ge.f32 %qv0, %f123, %qf0;
