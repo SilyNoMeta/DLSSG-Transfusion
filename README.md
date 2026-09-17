@@ -13,10 +13,11 @@ Version **1.4.1** consolidated all proxy DLLs into a single universal `DLSSG-Tra
 adds an in-game multiplier overlay, and improves shadow/translucent quality at high speed.
 
 ### What's New in Version 1.4.5
-- **Tear-Free Thin Geometry Recovery (Fences & Foliage)**: Ported and refined from the RenoDx Release 1.0 Validated Warp Blend foundation. Fine-tuned with a `0.03f` disparity margin and `0.28f` warped error ceiling, eliminating wire fence and grass blade tearing across all camera speeds and multipliers up to 6x.
-- **Pristine Moving Shadows**: Completely eliminated broad surface elevation (Track 1) so ground textures and dynamic vehicle/character shadows remain 100% under stock DLSS-G's neural blend, preventing erased dots and hole-punch artifacts.
-- **Pure Symmetrical 0.98f Weight Floor**: Pure candidate FMA reconstruction with zero cross-candidate copying or ghosting.
-- **Multiplier Overlay Stability**: Moved DXGI Present hook initialization out of `DLL_PROCESS_ATTACH` into the worker thread, completely preventing loader-lock deadlocks on game startup. Added non-blocking backbuffer rendering and clean `ResizeBuffers` resource release.
+- **Tear-Free Thin Geometry Protection (Fences & Foliage)**: Ported and refined from the RenoDX addon foundation created by **mavismmg** ([mavismmg/MFGAdaUnlock-RenoDx](https://github.com/mavismmg/MFGAdaUnlock-RenoDx)) with candidate agreement firewall. Fine-tuned with a 14% candidate delta margin, `0.6f` scale floor, and `0.98f` geometric warp floor, completely eliminating wire fence and foliage tearing across all camera speeds and multipliers up to 6x.
+- **Pristine Moving Shadows (Zero Erosion Dots)**: Dynamic vehicle, bike, and character shadows maintain complete integrity with zero hole-punching, flickering, or eroded shadow dots, even under extreme speeds (tested at 138+ km/h).
+- **Zero-Division PTX Kernel Optimization**: Eliminated all 43 slow SFU division instructions (`div.approx`) across stock `Kernel_BlendCandidatesFused` and runtime quality patches, replacing them with bit-exact single-cycle operations for maximum ALU throughput.
+- **Loading Screen & Menu Stability**: Defaulted `disableMenuDetection` to `false`, allowing DLSS-G to safely idle at 1x on static menus and loading screens, preventing DXGI device-hang crashes (`0x887A0005` / `0x887A0006`) in Capcom RE Engine (Onimusha, Pragmata, RE4, DD2) and modern titles.
+- **Multiplier Overlay Stability**: Moved DXGI Present hook initialization out of `DLL_PROCESS_ATTACH` into the worker thread, completely preventing loader-lock deadlocks on game startup. Added `DXGI_PRESENT_TEST` bypass, 1x telemetry suspension, and safe fence/buffer guards so the overlay never stalls engine presentation queues.
 - **Motion Tracing Toggle**: Added `logMotionTracing` config key (off by default) to eliminate log file overhead during normal gameplay.
 
 ### What's New in Version 1.4.0
@@ -147,8 +148,8 @@ Logs are written to the temporary directory and include the process ID.
 
 ## Credits
 
-- **[dashdogy/RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock)** - original mod this project is based on
-- **[mavismmg/MFGAdaUnlock-RenoDx](https://github.com/mavismmg/MFGAdaUnlock-RenoDx)** - architecture gate bypass and foundational fixes
+- **[dashdogy/RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock)** - Original mod this project is based on, midpoint compaction research, and Streamline in-memory hooking architecture.
+- **[mavismmg/MFGAdaUnlock-RenoDx](https://github.com/mavismmg/MFGAdaUnlock-RenoDx)** - Creator and maintainer of the RenoDX MFG Unlock addon, architecture gate bypass, intermediate scatter retention, and the Validated Warp Blend foundation.
 
 ## Disclaimer
 
