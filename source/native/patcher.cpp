@@ -1016,6 +1016,20 @@ bool TryParseBoolean(const std::string& content, const char* name, bool& value)
     return false;
 }
 
+bool TryParsePosition(const std::string& content, const char* name, multiplier_overlay::Position& pos)
+{
+    size_t offset = 0;
+    if (!FindJsonValue(content, name, offset))
+        return false;
+    const char* p = &content[offset];
+    if (*p == '"') p++;
+    if (_strnicmp(p, "top-right", 9) == 0) { pos = multiplier_overlay::Position::TopRight; return true; }
+    if (_strnicmp(p, "bottom-right", 12) == 0) { pos = multiplier_overlay::Position::BottomRight; return true; }
+    if (_strnicmp(p, "bottom-left", 11) == 0) { pos = multiplier_overlay::Position::BottomLeft; return true; }
+    if (_strnicmp(p, "top-left", 8) == 0) { pos = multiplier_overlay::Position::TopLeft; return true; }
+    return false;
+}
+
 bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
 {
     char json[4096]{};
@@ -1028,6 +1042,7 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         "  \"dynamicExperimental56\": %s,  // Allow 5x and 6x in dynamic mode (requires high VRAM)\n"
         "  \"forceOTA\": %s,               // Force loading of downloaded Over-The-Air DLSS-G neural models\n"
         "  \"showOverlay\": %s,            // Show in-game multiplier and FPS overlay (toggle: Ctrl+Alt+O)\n"
+        "  \"overlayPosition\": \"%s\",      // Overlay screen position: \"top-left\", \"top-right\", \"bottom-left\", \"bottom-right\" (cycle: Ctrl+Alt+P)\n"
         "  \"patchFlipMetering\": %s,      // OptiScaler Flip Metering bypass (default: false)\n"
         "  \"blackwellTransfusion\": %s,    // Blackwell sm_120 kernel cadence scatter backported to Ada sm_89\n"
         "  \"qualityValidWarp\": %s,        // Candidate Agreement Firewall & thin-geometry protection (anti-tear/anti-ghost)\n"
@@ -1044,6 +1059,7 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         control.dynamicExperimental56 ? "true" : "false",
         gConfigForceOta.load(std::memory_order_relaxed) ? "true" : "false",
         multiplier_overlay::IsVisible() ? "true" : "false",
+        multiplier_overlay::PositionToString(multiplier_overlay::GetPosition()),
         gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? "true" : "false",
         gConfigBlackwellTransfusion.load(std::memory_order_relaxed) ? "true" : "false",
         gConfigQualityFix.load(std::memory_order_relaxed) ? "true" : "false",
@@ -1153,6 +1169,12 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
         && TryParseBoolean(content, "showOverlay", showOverlay);
     if (hasOverlay) multiplier_overlay::SetVisible(showOverlay);
     else if (missingKeys) missingKeys->push_back("showOverlay");
+
+    multiplier_overlay::Position overlayPos = multiplier_overlay::GetPosition();
+    const bool hasOverlayPos = TryParsePosition(content, "overlayPosition", overlayPos)
+        || TryParsePosition(content, "overlayCorner", overlayPos);
+    if (hasOverlayPos) multiplier_overlay::SetPosition(overlayPos);
+    else if (missingKeys) missingKeys->push_back("overlayPosition");
 
     size_t flipOffset = 0;
     bool patchFlip = gConfigPatchFlipMetering.load(std::memory_order_relaxed);
@@ -4645,6 +4667,12 @@ bool ProcessStandaloneHotkeys(ControlConfig& control, bool& controlChanged)
     static bool sOverlayWasDown = false;
     const bool overlayPressed = ctrlPressed && altPressed && overlayDown && !sOverlayWasDown;
     sOverlayWasDown = overlayDown;
+
+    const bool posDown = (GetAsyncKeyState('P') & 0x8000) != 0;
+    static bool sPosWasDown = false;
+    const bool posPressed = ctrlPressed && altPressed && posDown && !sPosWasDown;
+    sPosWasDown = posDown;
+
     if (!ctrlPressed || !altPressed)
         return false;
 
@@ -4660,6 +4688,13 @@ bool ProcessStandaloneHotkeys(ControlConfig& control, bool& controlChanged)
         multiplier_overlay::SetVisible(visible);
         changed = true;
         Log(L"[HOTKEY] Overlay %s", visible ? L"enabled" : L"disabled");
+    }
+    else if (posPressed)
+    {
+        multiplier_overlay::CyclePosition();
+        changed = true;
+        Log(L"[HOTKEY] Overlay position set to %hs",
+            multiplier_overlay::PositionToString(multiplier_overlay::GetPosition()));
     }
     for (uint32_t mult = 2; mult <= 6; ++mult)
     {

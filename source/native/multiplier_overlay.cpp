@@ -35,6 +35,7 @@ Present1 gPresent1{};
 ResizeBuffers gResizeBuffers{};
 std::atomic<bool> gInstalled{false};
 std::atomic<bool> gVisible{false};
+std::atomic<uint32_t> gPosition{static_cast<uint32_t>(Position::TopLeft)};
 const std::atomic<uint32_t>* gActual{};
 const std::atomic<uint32_t>* gApplied{};
 const std::atomic<bool>* gFgOn{};
@@ -325,12 +326,35 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     float textWidth=0.f;
     for(const char* p=label;*p;++p) textWidth+=(*p==' ' ? 6.f : advance);
     const auto d=c.buffers[i]->GetDesc(); if(d.Width==0 || d.Height==0) return; auto& vertices=c.vertices; vertices.clear();
-    const float panelW=textWidth+8.f, panelH=19.f, x=10.f, y=10.f;
-    AddRect(vertices,x,y,x+panelW,y+panelH,float(d.Width),float(d.Height),0.f,0.f,0.f,.38f);
-    float glyphX=x+4.f;
-    for(const char* p=label;*p;++p) {
-        if(*p==' ') glyphX+=6.f;
-        else { AddGlyph(vertices,*p,glyphX,y+2.5f,scale,float(d.Width),float(d.Height)); glyphX+=advance; }
+    const float panelW = textWidth + 8.f, panelH = 19.f, margin = 10.f;
+    const auto pos = static_cast<Position>(gPosition.load(std::memory_order_relaxed));
+    float x = margin;
+    float y = margin;
+    switch (pos)
+    {
+    case Position::TopRight:
+        x = (float(d.Width) > panelW + margin) ? (float(d.Width) - panelW - margin) : margin;
+        y = margin;
+        break;
+    case Position::BottomRight:
+        x = (float(d.Width) > panelW + margin) ? (float(d.Width) - panelW - margin) : margin;
+        y = (float(d.Height) > panelH + margin) ? (float(d.Height) - panelH - margin) : margin;
+        break;
+    case Position::BottomLeft:
+        x = margin;
+        y = (float(d.Height) > panelH + margin) ? (float(d.Height) - panelH - margin) : margin;
+        break;
+    case Position::TopLeft:
+    default:
+        x = margin;
+        y = margin;
+        break;
+    }
+    AddRect(vertices, x, y, x + panelW, y + panelH, float(d.Width), float(d.Height), 0.f, 0.f, 0.f, .38f);
+    float glyphX = x + 4.f;
+    for (const char* p = label; *p; ++p) {
+        if (*p == ' ') glyphX += 6.f;
+        else { AddGlyph(vertices, *p, glyphX, y + 2.5f, scale, float(d.Width), float(d.Height)); glyphX += advance; }
     }
     // Never stall Present waiting for overlay work. If this backbuffer is still
     // busy, skip one indicator update and let the game continue presenting.
@@ -412,5 +436,35 @@ bool Install(const std::atomic<uint32_t>* actual,const std::atomic<uint32_t>* ap
 }
 void SetVisible(bool visible){gVisible.store(visible,std::memory_order_release);}
 bool IsVisible(){return gVisible.load(std::memory_order_acquire);}
+void SetPosition(Position pos){gPosition.store(static_cast<uint32_t>(pos),std::memory_order_release);}
+Position GetPosition(){return static_cast<Position>(gPosition.load(std::memory_order_acquire));}
+void CyclePosition()
+{
+    uint32_t cur = gPosition.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        const uint32_t next = (cur + 1) % 4;
+        if (gPosition.compare_exchange_weak(cur, next, std::memory_order_acq_rel))
+            break;
+    }
+}
+const char* PositionToString(Position pos)
+{
+    switch (pos)
+    {
+    case Position::TopRight: return "top-right";
+    case Position::BottomRight: return "bottom-right";
+    case Position::BottomLeft: return "bottom-left";
+    case Position::TopLeft:
+    default: return "top-left";
+    }
+}
+Position PositionFromString(std::string_view str)
+{
+    if (str == "top-right" || str == "\"top-right\"") return Position::TopRight;
+    if (str == "bottom-right" || str == "\"bottom-right\"") return Position::BottomRight;
+    if (str == "bottom-left" || str == "\"bottom-left\"") return Position::BottomLeft;
+    return Position::TopLeft;
+}
 void Uninstall(){gVisible=false;/* Hooks intentionally remain until process teardown; detaching while Present is active is less safe. */}
 }

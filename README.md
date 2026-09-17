@@ -17,7 +17,8 @@ adds an in-game multiplier overlay, and improves shadow/translucent quality at h
 - **Pristine Moving Shadows (Zero Erosion Dots)**: Dynamic vehicle, bike, and character shadows maintain complete integrity with zero hole-punching, flickering, or eroded shadow dots, even under extreme speeds (tested at 138+ km/h).
 - **Zero-Division PTX Kernel Optimization**: Eliminated all 43 slow SFU division instructions (`div.approx`) across stock `Kernel_BlendCandidatesFused` and runtime quality patches, replacing them with bit-exact single-cycle operations for maximum ALU throughput.
 - **Loading Screen & Menu Stability**: Defaulted `disableMenuDetection` to `false`, allowing DLSS-G to safely idle at 1x on static menus and loading screens, preventing DXGI device-hang crashes (`0x887A0005` / `0x887A0006`) in Capcom RE Engine (Onimusha, Pragmata, RE4, DD2) and modern titles.
-- **Multiplier Overlay Stability**: Moved DXGI Present hook initialization out of `DLL_PROCESS_ATTACH` into the worker thread, completely preventing loader-lock deadlocks on game startup. Added `DXGI_PRESENT_TEST` bypass, 1x telemetry suspension, and safe fence/buffer guards so the overlay never stalls engine presentation queues.
+- **Multiplier Overlay Stability & Corner Placement**: Moved DXGI Present hook initialization out of `DLL_PROCESS_ATTACH` into the worker thread, completely preventing loader-lock deadlocks on game startup. Added `DXGI_PRESENT_TEST` bypass, 1x telemetry suspension, and safe fence/buffer guards. Added configurable screen corner placement (`top-left`, `top-right`, `bottom-left`, `bottom-right` via `overlayPosition`) dynamically anchored to DXGI backbuffer dimensions, with real-time `Ctrl + Alt + P` corner cycling.
+- **Disable In-Game Keybinds Option**: Added `disableKeybinds` configuration key (`false` by default). When set to `true`, disables all in-game hotkeys and lets DLSS Frame Generation follow game settings or NVIDIA Profile Inspector multipliers directly.
 - **Motion Tracing Toggle**: Added `logMotionTracing` config key (off by default) to eliminate log file overhead during normal gameplay.
 
 ### What's New in Version 1.4.0
@@ -96,6 +97,7 @@ The mod can be used in **any game** with NVIDIA DLSS Frame Generation and Stream
    - `Ctrl + Alt + Up` / `+`: Increase Dynamic MFG target FPS (+5 FPS; hold Shift for 1 FPS fine adjustment)
    - `Ctrl + Alt + Down` / `-`: Decrease Dynamic MFG target FPS (-5 FPS; hold Shift for 1 FPS fine adjustment)
    - `Ctrl + Alt + O`: Toggle the in-game multiplier/state overlay (off by default)
+   - `Ctrl + Alt + P`: Cycle overlay corner position across screen corners (top-left, top-right, bottom-right, bottom-left)
 4. Detailed diagnostic logs are written directly to `DLSSG-Transfusion.log` in the game directory.
 5. See [INJECTION.md](INJECTION.md) for full instructions and troubleshooting.
 
