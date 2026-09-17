@@ -1018,24 +1018,24 @@ bool TryParseBoolean(const std::string& content, const char* name, bool& value)
 
 bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
 {
-    char json[1024]{};
+    char json[4096]{};
     const int len = sprintf_s(json,
         "{\n"
-        "  \"multiplier\": %u,\n"
-        "  \"mode\": \"%s\",\n"
-        "  \"disableKeybinds\": %s,\n"
-        "  \"dynamicTargetFrameRate\": %u,\n"
-        "  \"dynamicExperimental56\": %s,\n"
-        "  \"forceOTA\": %s,\n"
-        "  \"showOverlay\": %s,\n"
-        "  \"patchFlipMetering\": %s,\n"
-        "  \"blackwellTransfusion\": %s,\n"
-        "  \"qualityValidWarp\": %s,\n"
-        "  \"disableMenuDetection\": %s,\n"
-        "  \"disableMvDilation\": %s,\n"
-        "  \"forceUiRecomposition\": %s,\n"
-        "  \"logPerformance\": %s,\n"
-        "  \"logMotionTracing\": %s\n"
+        "  \"multiplier\": %u,               // Target multiplier: 2 to 6 (Fixed mode)\n"
+        "  \"mode\": \"%s\",                 // \"fixed\" (manual multiplier) or \"dynamic\" (auto-adjusts to target FPS)\n"
+        "  \"disableKeybinds\": %s,        // Disable in-game hotkeys; multipliers solely controlled by game or Profile Inspector\n"
+        "  \"dynamicTargetFrameRate\": %u,   // Target FPS for dynamic mode (0 = follow display refresh rate)\n"
+        "  \"dynamicExperimental56\": %s,  // Allow 5x and 6x in dynamic mode (requires high VRAM)\n"
+        "  \"forceOTA\": %s,               // Force loading of downloaded Over-The-Air DLSS-G neural models\n"
+        "  \"showOverlay\": %s,            // Show in-game multiplier and FPS overlay (toggle: Ctrl+Alt+O)\n"
+        "  \"patchFlipMetering\": %s,      // OptiScaler Flip Metering bypass (default: false)\n"
+        "  \"blackwellTransfusion\": %s,    // Blackwell sm_120 kernel cadence scatter backported to Ada sm_89\n"
+        "  \"qualityValidWarp\": %s,        // Candidate Agreement Firewall & thin-geometry protection (anti-tear/anti-ghost)\n"
+        "  \"disableMenuDetection\": %s,   // Disable menu throttling (false = safe for loading screens)\n"
+        "  \"disableMvDilation\": %s,      // Experimental: disable motion vector dilation\n"
+        "  \"forceUiRecomposition\": %s,   // Force native UI Recomposition buffer engagement (UIR)\n"
+        "  \"logPerformance\": %s,         // Rolling FPS/frametime telemetry to DLSSG-Transfusion_perf.csv\n"
+        "  \"logMotionTracing\": %s        // High-frequency motion tracing diagnostics for deep debugging\n"
         "}\n",
         control.multiplier,
         control.dynamic ? "dynamic" : "fixed",
