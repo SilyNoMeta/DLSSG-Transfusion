@@ -278,6 +278,7 @@ std::atomic<bool> gConfigForceUiRecomposition{false};
 std::atomic<bool> gIsEndfield{false};
 std::atomic<bool> gConfigLogPerformance{false};
 std::atomic<bool> gConfigLogMotionTracing{false};
+std::atomic<bool> gConfigDisableKeybinds{false};
 
 std::wstring gPerfCsvPath;
 FILE* gPerfCsv = nullptr;
@@ -1022,6 +1023,7 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         "{\n"
         "  \"multiplier\": %u,\n"
         "  \"mode\": \"%s\",\n"
+        "  \"disableKeybinds\": %s,\n"
         "  \"dynamicTargetFrameRate\": %u,\n"
         "  \"dynamicExperimental56\": %s,\n"
         "  \"forceOTA\": %s,\n"
@@ -1037,6 +1039,7 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         "}\n",
         control.multiplier,
         control.dynamic ? "dynamic" : "fixed",
+        gConfigDisableKeybinds.load(std::memory_order_relaxed) ? "true" : "false",
         control.dynamicTargetFrameRate,
         control.dynamicExperimental56 ? "true" : "false",
         gConfigForceOta.load(std::memory_order_relaxed) ? "true" : "false",
@@ -1108,6 +1111,13 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
     {
         missingKeys->push_back("mode");
     }
+
+    size_t keybindsOffset = 0;
+    bool disableKeybinds = gConfigDisableKeybinds.load(std::memory_order_relaxed);
+    const bool hasKeybinds = (FindJsonValue(content, "disableKeybinds", keybindsOffset) && TryParseBoolean(content, "disableKeybinds", disableKeybinds))
+        || (FindJsonValue(content, "disableHotkeys", keybindsOffset) && TryParseBoolean(content, "disableHotkeys", disableKeybinds));
+    if (hasKeybinds) gConfigDisableKeybinds.store(disableKeybinds, std::memory_order_relaxed);
+    else if (missingKeys) missingKeys->push_back("disableKeybinds");
 
     size_t targetOffset = 0;
     const bool hasTarget = (FindJsonValue(content, "dynamicTargetFrameRate", targetOffset)
@@ -1619,30 +1629,58 @@ sl::DLSSGOptions BuildAdjustedOptions(
     const UiInputSnapshot* uiInputs = nullptr)
 {
     sl::DLSSGOptions adjusted = CopyKnownOptions(source, preserveNext);
-    const bool isDynamic = snapshot.control.dynamic
-        || (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic);
-    if (isDynamic)
+    const bool disableKeybinds = gConfigDisableKeybinds.load(std::memory_order_relaxed);
+
+    if (disableKeybinds)
     {
-        // The injected object is a complete v5 structure even when Cyberpunk supplied
-        // an older prefix, so the active wrapper can consume the dynamic target
-        // without reading beyond the game's allocation.
-        adjusted.structVersion = sl::kStructVersion5;
-        adjusted.mode = sl::DLSSGMode::eDynamic;
-        float targetFps = (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic && source.dynamicTargetFrameRate > 0.0f)
-            ? source.dynamicTargetFrameRate
-            : static_cast<float>(snapshot.control.dynamicTargetFrameRate > 0 ? snapshot.control.dynamicTargetFrameRate : 120);
-        adjusted.dynamicTargetFrameRate = targetFps;
-        adjusted.numFramesToGenerate =
-            RequestedMaximumGeneratedFrames(snapshot.control);
+        // When disableKeybinds is enabled, multipliers are solely controlled by the game or profile inspector
+        const bool isDynamic = (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic);
+        if (isDynamic)
+        {
+            adjusted.structVersion = std::max<size_t>(adjusted.structVersion, sl::kStructVersion5);
+            adjusted.mode = sl::DLSSGMode::eDynamic;
+            adjusted.dynamicTargetFrameRate = source.dynamicTargetFrameRate > 0.0f
+                ? source.dynamicTargetFrameRate
+                : (snapshot.control.dynamicTargetFrameRate > 0 ? static_cast<float>(snapshot.control.dynamicTargetFrameRate) : 120.0f);
+            adjusted.numFramesToGenerate = source.numFramesToGenerate > 0
+                ? source.numFramesToGenerate
+                : RequestedMaximumGeneratedFrames(snapshot.control);
+        }
+        else
+        {
+            adjusted.mode = (source.mode == sl::DLSSGMode::eAuto) ? sl::DLSSGMode::eAuto : sl::DLSSGMode::eOn;
+            const uint32_t gameGenFrames = source.numFramesToGenerate > 0 ? source.numFramesToGenerate : 1;
+            adjusted.numFramesToGenerate = std::clamp<uint32_t>(gameGenFrames, 1, kExperimentalMaximumGeneratedFrames);
+            adjusted.structVersion = std::max<size_t>(adjusted.structVersion, sl::kStructVersion5);
+        }
     }
     else
     {
-        adjusted.mode = sl::DLSSGMode::eOn;
-        adjusted.numFramesToGenerate =
-            std::clamp(snapshot.control.multiplier,
-            kMinimumMultiplier, kMaximumMultiplier) - 1;
-        adjusted.structVersion = std::max<size_t>(
-            adjusted.structVersion, sl::kStructVersion5);
+        const bool isDynamic = snapshot.control.dynamic
+            || (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic);
+        if (isDynamic)
+        {
+            // The injected object is a complete v5 structure even when Cyberpunk supplied
+            // an older prefix, so the active wrapper can consume the dynamic target
+            // without reading beyond the game's allocation.
+            adjusted.structVersion = sl::kStructVersion5;
+            adjusted.mode = sl::DLSSGMode::eDynamic;
+            float targetFps = (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic && source.dynamicTargetFrameRate > 0.0f)
+                ? source.dynamicTargetFrameRate
+                : static_cast<float>(snapshot.control.dynamicTargetFrameRate > 0 ? snapshot.control.dynamicTargetFrameRate : 120);
+            adjusted.dynamicTargetFrameRate = targetFps;
+            adjusted.numFramesToGenerate =
+                RequestedMaximumGeneratedFrames(snapshot.control);
+        }
+        else
+        {
+            adjusted.mode = sl::DLSSGMode::eOn;
+            adjusted.numFramesToGenerate =
+                std::clamp(snapshot.control.multiplier,
+                kMinimumMultiplier, kMaximumMultiplier) - 1;
+            adjusted.structVersion = std::max<size_t>(
+                adjusted.structVersion, sl::kStructVersion5);
+        }
     }
     if (enableUiRecomposition)
     {
@@ -1773,7 +1811,8 @@ bool ReadLastGameOptions(
 }
 
 void RecordAppliedControl(const ControlSnapshot& snapshot, sl::Result result,
-    bool liveReapply, bool uiRecompositionEnabled, bool uiRecompositionForced)
+    bool liveReapply, bool uiRecompositionEnabled, bool uiRecompositionForced,
+    uint32_t actualAppliedMultiplier = 0)
 {
     gSetOptionsSeen.store(true, std::memory_order_release);
     gLastSetOptionsResult.store(static_cast<int32_t>(result), std::memory_order_relaxed);
@@ -1786,8 +1825,9 @@ void RecordAppliedControl(const ControlSnapshot& snapshot, sl::Result result,
         return;
 
     const uint64_t previous = gAppliedRevision.load(std::memory_order_acquire);
+    const uint32_t appliedMult = actualAppliedMultiplier > 0 ? actualAppliedMultiplier : snapshot.control.multiplier;
     gAppliedDynamicMode.store(snapshot.control.dynamic, std::memory_order_relaxed);
-    gAppliedMultiplier.store(snapshot.control.multiplier, std::memory_order_relaxed);
+    gAppliedMultiplier.store(appliedMult, std::memory_order_relaxed);
     gAppliedDynamicTargetFrameRate.store(
         snapshot.control.dynamicTargetFrameRate, std::memory_order_relaxed);
     gAppliedDynamicExperimental56.store(
@@ -1802,7 +1842,12 @@ void RecordAppliedControl(const ControlSnapshot& snapshot, sl::Result result,
 
     if (previous == snapshot.revision)
         return;
-    if (snapshot.control.dynamic)
+    if (gConfigDisableKeybinds.load(std::memory_order_relaxed))
+        Log(L"%s game/profile-driven DLSS-G: %ux (%u generated frames), result=%d (%s)",
+            liveReapply ? L"Live-reapplied" : L"Applied",
+            appliedMult, appliedMult > 0 ? appliedMult - 1 : 0,
+            static_cast<int>(result), ResultName(result));
+    else if (snapshot.control.dynamic)
         Log(L"%s dynamic MFG: target=%u FPS experimental56=%d max=%ux result=%d (%s)",
             liveReapply ? L"Live-reapplied" : L"Applied",
             snapshot.control.dynamicTargetFrameRate,
@@ -1854,8 +1899,9 @@ sl::Result SubmitAdjustedOptions(
 
     SynchronizeStreamlineLiveContext();
     const sl::Result result = original(viewport, adjusted);
+    const uint32_t effectiveMultiplier = adjusted.numFramesToGenerate + 1;
     RecordAppliedControl(snapshot, result, liveReapply,
-        uiRecompositionEnabled, forceUiRecomposition);
+        uiRecompositionEnabled, forceUiRecomposition, effectiveMultiplier);
 
     if (!liveReapply && result != sl::Result::eOk && result != sl::Result::eWarnOutOfVRAM)
     {
@@ -1951,7 +1997,8 @@ void ReapplyPendingControl(const sl::ViewportHandle& viewport)
         vpCopy.next = &adjusted;
         adjusted.next = nullptr;
         const sl::Result result = originalSetData(&vpCopy, nullptr);
-        RecordAppliedControl(snapshot, result, true, adjusted.enableUserInterfaceRecomposition == sl::Boolean::eTrue, false);
+        const uint32_t effectiveMultiplier = adjusted.numFramesToGenerate + 1;
+        RecordAppliedControl(snapshot, result, true, adjusted.enableUserInterfaceRecomposition == sl::Boolean::eTrue, false, effectiveMultiplier);
         if (result != sl::Result::eOk && result != sl::Result::eWarnOutOfVRAM)
             Log(L"Live reapply via setData failed for request revision %llu: result=%d (%s)",
                 static_cast<unsigned long long>(snapshot.revision), static_cast<int>(result), ResultName(result));
@@ -2393,7 +2440,8 @@ sl::Result HookSlSetData(const sl::BaseStructure* inputs, sl::CommandBuffer* cmd
             if (prevNode)
                 prevNode->next = const_cast<sl::BaseStructure*>(reinterpret_cast<const sl::BaseStructure*>(options));
 
-            RecordAppliedControl(snapshot, result, false, false, false);
+            const uint32_t effectiveMultiplier = adjusted.numFramesToGenerate + 1;
+            RecordAppliedControl(snapshot, result, false, false, false, effectiveMultiplier);
             return result == sl::Result::eWarnOutOfVRAM ? sl::Result::eOk : result;
         }
     }
@@ -4580,6 +4628,8 @@ bool RegisterDllNotification()
 bool ProcessStandaloneHotkeys(ControlConfig& control, bool& controlChanged)
 {
     controlChanged = false;
+    if (gConfigDisableKeybinds.load(std::memory_order_relaxed))
+        return false;
     const bool ctrlPressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool altPressed = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
     const bool overlayDown = (GetAsyncKeyState('O') & 0x8000) != 0;
@@ -4787,9 +4837,10 @@ DWORD WINAPI PatchWorker(void* context)
     }
     FILETIME configWriteTime{};
     ReadLastWriteTime(gConfigPath, configWriteTime);
-    Log(L"Initial control: mode=%s multiplier=%ux dynamicTarget=%u FPS "
+    Log(L"Initial control: mode=%s multiplier=%ux disableKeybinds=%d dynamicTarget=%u FPS "
         L"dynamicExperimental56=%d blackwellTransfusion=%d disableMenuDetection=%d disableMvDilation=%d forceUiRecomposition=%d logPerformance=%d logMotionTracing=%d; config: %s",
         initialControl.dynamic ? L"dynamic" : L"fixed", initialControl.multiplier,
+        gConfigDisableKeybinds.load(std::memory_order_relaxed) ? 1 : 0,
         initialControl.dynamicTargetFrameRate, initialControl.dynamicExperimental56,
         gConfigBlackwellTransfusion.load(std::memory_order_relaxed),
         gConfigDisableMenuDetection.load(std::memory_order_relaxed),
