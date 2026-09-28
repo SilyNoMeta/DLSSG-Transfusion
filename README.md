@@ -1,11 +1,25 @@
 # DLSSG-Transfusion: Universal Multi-Frame Generation Unlock
 
 Universal DLSS Multi-Frame Generation enabler (2x through 6x and Dynamic Mode) for
-NVIDIA RTX 40-Series (Ada Lovelace) GPUs with runtime **Blackwell Kernel Transfusion**.
+NVIDIA RTX 40-Series (Ada Lovelace), RTX 30-Series (Ampere) and RTX 20-Series (Turing) GPUs
+with runtime **Blackwell Kernel Transfusion**.
 
-Dynamic defaults to a 4x ceiling. Its UI toggle allows experimental 5x and 6x.
-UI recomposition is requested only when matching HUDless and UI buffers are tagged.
-The panel reports rendered FPS and total DLSS output FPS.
+This is a fork of [TonyJoaca/DLSSG-Transfusion](https://github.com/TonyJoaca/DLSSG-Transfusion)
+v1.4.5. Tony's patches on NVIDIA's runtime remain the engine; this fork extends them to older
+GPUs and adds the features below.
+
+### What's New in Version v1.4.5.0-rtx20-30-40
+First public release of this fork; it gathers the private builds v1.4.5.1 to v1.4.5.3-rtx2030 and the Vulkan work. Full changelog (English and French): [CHANGELOG.md](CHANGELOG.md).
+
+- **RTX 30 (Ampere) support, RTX 20 (Turing) experimental**: architecture gates lowered to the GPU present, Blackwell kernels retargeted, Ampere-only instructions rewritten for Turing. See [docs/RTX30-SM86.md](docs/RTX30-SM86.md).
+- **`explained-warp`, our valid-warp policy, by default**: it keeps the warp where it explains what changed between the two frames, which keeps fine detail and clean moving shadows at the same time. Tony's `transfusion` policy remains available. See [docs/QUALITY-POLICY.md](docs/QUALITY-POLICY.md).
+- **Faster frame generation, identical image** (`"optimizedKernels"`): −33 % GPU time at 2x, −18 % at 6x on an RTX 3070 Ti Laptop, bit-exact. See [docs/OPTIMIZED-KERNELS.md](docs/OPTIMIZED-KERNELS.md).
+- **UI assist** (DX12) and **UI recomposition that can follow the game** (`"autoUiRecomposition"`, automatic for DOOM: The Dark Ages). See [docs/HUD-ASSIST.md](docs/HUD-ASSIST.md).
+- **Vulkan**: our kernels through `VK_NVX_binary_import`, adaptive Dynamic mode, overlay drawn by the ReShade add-on. Validated on an RTX 4090 in No Man's Sky and DOOM: The Dark Ages. See [docs/VULKAN.md](docs/VULKAN.md).
+- **ReShade settings panel**, `"mode": "game"` by default, remappable shortcuts, optional overlay lines, DLSS render resolution (with live `r.ScreenPercentage` in Unreal Engine games), readable JSON. See [INJECTION.md](INJECTION.md#reshade-settings-panel-optional).
+- **Fixes**: Cyberpunk 2077 startup crash; DOOM: The Dark Ages crash with the overlay shown.
+
+Dynamic defaults to a 4x ceiling; the panel's toggle allows experimental 5x and 6x.
 
 Version **1.4.5** brings refined thin-geometry protection (100% tear-free wire fences and grass across up to 6x multipliers with pristine dynamic shadows), overlay stability fixes, and consolidated proxy distribution.
 
@@ -98,20 +112,27 @@ The mod can be used in **any game** with NVIDIA DLSS Frame Generation and Stream
    - `Ctrl + Alt + Down` / `-`: Decrease Dynamic MFG target FPS (-5 FPS; hold Shift for 1 FPS fine adjustment)
    - `Ctrl + Alt + O`: Toggle the in-game multiplier/state overlay (off by default)
    - `Ctrl + Alt + P`: Cycle overlay corner position across screen corners (top-left, top-right, bottom-right, bottom-left)
+   - Set `"mode": "game"` in `DLSSG-Transfusion.json` to let the game (or NVIDIA Profile Inspector) choose the multiplier and Fixed/Dynamic mode. Overlay hotkeys keep working; any multiplier/mode hotkey switches back to Fixed or Dynamic.
 4. Detailed diagnostic logs are written directly to `DLSSG-Transfusion.log` in the game directory.
 5. See [INJECTION.md](INJECTION.md) for full instructions and troubleshooting.
 
-## Install (Cyberpunk 2077 with CET)
+## Optional ReShade settings panel
 
-Requires Cyberpunk 2077, Cyber Engine Tweaks, an RTX 40 series GPU, and DLSS
-Frame Generation enabled. CET 1.37.1 was used during development.
+Copy `DLSSG-Transfusion.addon64` next to the ReShade DLL (ReShade 6.8+ with full add-on
+support). The ReShade overlay then has a **DLSSG-Transfusion** tab that shows the engine
+state and edits every setting of `DLSSG-Transfusion.json` directly (nothing goes into
+`ReShade.ini`). Settings that are only read at startup are marked *Restart the game to
+apply*. See [INJECTION.md](INJECTION.md#reshade-settings-panel-optional).
 
-Extract `bin` into the Cyberpunk game directory, merge folders, then select a
-mode from the CET overlay. Select the multiplier before launch when possible.
+## Install (Cyberpunk 2077)
+
+Requires Cyberpunk 2077, an RTX 40, 30 or 20 series GPU, and DLSS Frame Generation
+enabled. Extract `bin` into the Cyberpunk game directory and merge folders: the
+`.asi` in `bin/x64/plugins` is loaded by the ASI loader of Cyber Engine Tweaks (or use
+`version.dll` in `bin/x64`). Choose the mode with the hotkeys, `DLSSG-Transfusion.json`
+or the optional ReShade panel; the former CET Lua panel has been removed.
 If Frame Generation is already active, toggle it Off and On (or restart the
-game) so Streamline rebuilds the feature with the requested shape. The release
-ZIP does not include `config.json`, so installing it preserves the selected
-mode.
+game) so Streamline rebuilds the feature with the requested shape.
 
 ## How it works
 
@@ -144,6 +165,14 @@ cmake --build .\build --config Release --parallel
 
 The native build writes `DLSSG-Transfusion.dll` (universal proxy) to `build\dist\`.
 Rename the DLL to your target proxy name before placing it in the game directory.
+To also build the optional ReShade add-on (`DLSSG-Transfusion.addon64`), add
+`-DRESHADE_ROOT="C:\path\to\reshade"`: a ReShade v6.8.0 source checkout with its
+`deps/imgui` submodule initialised.
+The NGX SDK headers are read from `<STREAMLINE_ROOT>/external/ngx-sdk/include`; if your
+Streamline SDK keeps them elsewhere, pass `-DNGX_INCLUDE_DIR=...`.
+
+The public repository leaves out a few kernels, which only affects part of `optimizedKernels`; released binaries include them. See [docs/PUBLIC-SOURCE.md](docs/PUBLIC-SOURCE.md).
+
 Breakpoint and deep-kernel research diagnostics are disabled in the normal build.
 
 Logs are written to the temporary directory and include the process ID.
@@ -152,6 +181,8 @@ Logs are written to the temporary directory and include the process ID.
 
 - **[dashdogy/RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock)** - Original mod this project is based on, midpoint compaction research, and Streamline in-memory hooking architecture.
 - **[mavismmg/MFGAdaUnlock-RenoDx](https://github.com/mavismmg/MFGAdaUnlock-RenoDx)** - Creator and maintainer of the RenoDX MFG Unlock addon, architecture gate bypass, intermediate scatter retention, and the Validated Warp Blend foundation.
+- **[TonyJoaca/DLSSG-Transfusion](https://github.com/TonyJoaca/DLSSG-Transfusion)** - Original DLSSG-Transfusion this fork is based on: Blackwell Kernel Transfusion, valid-warp quality fix, UI recomposition, universal proxy and overlay.
+- **[sdli1995/dlssg_for_sm86](https://github.com/sdli1995/dlssg_for_sm86)** - DLSS-G on RTX 20/30 research, whose backend served as the reference for the architecture patches and the optimized, bit-exact network and image kernels.
 
 ## Disclaimer
 

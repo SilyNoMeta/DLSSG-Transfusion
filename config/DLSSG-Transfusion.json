@@ -1,0 +1,65 @@
+{
+  "configVersion": 3,                        // Settings apply live unless the comment says to restart the game. Also editable with the ReShade add-on.
+  "general": {
+    "gpuArchitecture": "auto"                // auto, ada (RTX 40), ampere (RTX 30) or turing (RTX 20). Leave on auto unless detection fails. Restart the game to apply.
+  },
+  "frameGeneration": {
+    "mode": "game",                          // fixed (the multiplier below), dynamic (DLSS-G picks the multiplier to reach the target FPS) or game (the game or NVIDIA Profile Inspector decides).
+    "multiplier": 4,                         // Fixed mode multiplier: 2 to 6. 5 and 6 are experimental.
+    "dynamicTargetFrameRate": 0,             // Dynamic mode target FPS. 0 follows the refresh rate of the monitor showing the game.
+    "dynamicExperimental56": false,          // Let Dynamic mode go up to 5x and 6x (needs plenty of VRAM). Off: Dynamic stays at 4x or less.
+    "disableKeybinds": false                 // Turn off every keyboard shortcut and let the game or Profile Inspector control the multiplier.
+  },
+  "overlay": {
+    "showOverlay": false,                    // Show the in-game multiplier and FPS overlay.
+    "overlayPosition": "top-left",           // top-left, top-right, bottom-left or bottom-right.
+    "overlayShowUiRecomposition": false,     // Extra line: whether DLSS-G UI recomposition (UIR) is on.
+    "overlayShowHudless": false,             // Extra line: where the HUD-less scene comes from (game, UI assist capture or none).
+    "overlayShowUiAlpha": false,             // Extra line: where the UI alpha comes from (game, UI assist injection or none).
+    "overlayShowVersions": false,            // Extra line: DLSS (SR), DLSS-G (FG) and Streamline (SL) versions loaded by the game.
+    "overlayShowFramePacing": false,         // Extra line: displayed frame time (average, 99th percentile, jitter).
+    "overlayShowGpu": false,                 // Extra line: GPU load, temperature, power and clocks (NVML).
+    "overlayShowVram": false,                // Extra line: VRAM used / total on the GPU (all processes).
+    "overlayShowDebug": false                // Extra line: mode, generated-frame ceiling, Dynamic pacer hook, last Streamline result, patch route.
+  },
+  "imageQuality": {
+    "blackwellTransfusion": true,            // Use the RTX 50 (sm_120) frame-generation kernels on this GPU. Restart the game to apply.
+    "qualityValidWarp": true,                // Anti-tearing and anti-ghosting protection (candidate agreement firewall, thin geometry). Restart the game to apply.
+    "qualityPolicy": "explained-warp",       // Protection tuning: explained-warp (default) or transfusion. Restart the game to apply.
+    "optimizedKernels": true                 // Faster, bit-exact frame-generation kernels. Restart the game to apply.
+  },
+  "dlssSuperResolution": {
+    "dlssRenderScale": "game",               // Force the DLSS render resolution: game, dlaa, quality, balanced, performance, ultra-performance or custom. The game must use DLSS already.
+    "dlssCustomScale": 67                    // Render scale in percent (50 to 100) when dlssRenderScale is custom.
+  },
+  "hudUi": {
+    "autoUiRecomposition": true,             // Turn UI recomposition on when the game provides HUD-less and UI buffers without asking for it. False follows the game.
+    "forceUiRecomposition": false,           // Ask DLSS-G to recompose the HUD separately even when the game does not request it.
+    "uiAssist": true                         // D3D12: capture the HUD-less scene and build the UI layer when the game does not tag them.
+  },
+  "compatibility": {
+    "disableMenuDetection": false,           // Keep frame generation running in menus and loading screens. Leave false: idling at 1x there avoids device-hang crashes.
+    "forceOTA": false,                       // Load the Frame Generation models downloaded by the NVIDIA App. Restart the game to apply.
+    "patchFlipMetering": false,              // OptiScaler flip metering bypass, only for setups that need it. Restart the game to apply.
+    "disableMvDilation": false               // Legacy experiment: declare the motion vectors as already dilated. Leave false.
+  },
+  "diagnostics": {
+    "logPerformance": false,                 // Write FPS and frame times to DLSSG-Transfusion_perf.csv.
+    "logMotionTracing": false                // Very verbose motion-vector diagnostics, for debugging only.
+  },
+  "keyboardShortcuts": {
+    "hotkeyFixed2": "Ctrl+Alt+2, Ctrl+Alt+Num2", // Combinations such as Ctrl+Alt+4 or Ctrl+Shift+F5; several separated by commas; empty disables the action.
+    "hotkeyFixed3": "Ctrl+Alt+3, Ctrl+Alt+Num3",
+    "hotkeyFixed4": "Ctrl+Alt+4, Ctrl+Alt+Num4",
+    "hotkeyFixed5": "Ctrl+Alt+5, Ctrl+Alt+Num5",
+    "hotkeyFixed6": "Ctrl+Alt+6, Ctrl+Alt+Num6",
+    "hotkeyMultiplierUp": "Ctrl+Alt+PageUp",
+    "hotkeyMultiplierDown": "Ctrl+Alt+PageDown",
+    "hotkeyToggleDynamic": "Ctrl+Alt+D",
+    "hotkeyTargetFpsUp": "Ctrl+Alt+Up, Ctrl+Alt+Plus, Ctrl+Alt+NumAdd",
+    "hotkeyTargetFpsDown": "Ctrl+Alt+Down, Ctrl+Alt+Minus, Ctrl+Alt+NumSubtract",
+    "hotkeyGameMode": "Ctrl+Alt+G",
+    "hotkeyOverlay": "Ctrl+Alt+O",
+    "hotkeyOverlayPosition": "Ctrl+Alt+P"
+  }
+}

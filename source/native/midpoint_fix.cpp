@@ -1,5 +1,7 @@
 #include "midpoint_fix.h"
 #include "quality_fix.h"
+#include "ptx_lowering.h"
+#include "image_kernels.h"
 #include "scatter_experiment.h"
 #include "input_motion_experiment.h"
 
@@ -27,7 +29,38 @@ constexpr size_t kOuterHeader = 16;
 constexpr uint32_t kPtxKind = 1;
 constexpr uint32_t kAdaArch = 89;
 constexpr uint32_t kBlackwellArch = 120;
+constexpr uint32_t kArchParked = 122;
 constexpr uint64_t kUncompressedFlags = 0x41;
+
+// SM the rebuilt and retargeted PTX is compiled for by the driver: Ada by
+// default, Ampere (86) or Turing (75) when the provider runs below Ada.
+std::atomic<uint32_t> gTargetSm{kAdaArch};
+std::atomic<bool> gOptimizedKernels{true};
+// Set once a provider kernel matched the exact 310.9.1 source it was derived from.
+std::atomic<bool> gExactProviderKernels{false};
+
+inline std::string GetPtxEntryName(std::string_view ptx)
+{
+    size_t pos = ptx.find(".entry ");
+    if (pos == std::string_view::npos) return {};
+    pos += sizeof(".entry ") - 1;
+    size_t end = pos;
+    while (end < ptx.size() && ptx[end] != '(' && ptx[end] != ' ' && ptx[end] != '\r' && ptx[end] != '\n') ++end;
+    return std::string(ptx.substr(pos, end - pos));
+}
+
+// Rewrites the PTX .target directive to the target SM. The rebuilt entries
+// are uncompressed, so the directive may change length.
+inline bool RetargetPtxText(std::string& text, uint32_t sm)
+{
+    const size_t directive = text.find(".target sm_");
+    if (directive == std::string::npos) return false;
+    size_t end = directive + sizeof(".target ") - 1;
+    while (end < text.size() && text[end] != '\r' && text[end] != '\n' && text[end] != ' ' && text[end] != ',')
+        ++end;
+    text.replace(directive, end - directive, ".target sm_" + std::to_string(sm));
+    return true;
+}
 
 struct TemporalProfile
 {
@@ -346,6 +379,18 @@ inline bool BuildTemporalFatbin(const uint8_t* fat, size_t fat_size,
     }
     append(ptx.data() + src, n - src);
 
+    const uint32_t target_sm = gTargetSm.load(std::memory_order_relaxed);
+    if (target_sm != kAdaArch)
+    {
+        std::string text(patched.begin(), patched.end());
+        if (!RetargetPtxText(text, target_sm))
+        {
+            why = "temporal PTX has no .target directive";
+            return false;
+        }
+        patched.assign(text.begin(), text.end());
+    }
+
     const size_t padded = (patched.size() + 7) & ~size_t{7};
     const size_t final_size = entry + hdr + padded;
 
@@ -360,6 +405,7 @@ inline bool BuildTemporalFatbin(const uint8_t* fat, size_t fat_size,
     std::memcpy(out.data() + entry + 16, &zero32, sizeof(zero32));
     std::memcpy(out.data() + entry + 40, &kUncompressedFlags, sizeof(kUncompressedFlags));
     std::memcpy(out.data() + entry + 56, &zero64, sizeof(zero64));
+    std::memcpy(out.data() + entry + 28, &target_sm, sizeof(target_sm));
     const uint64_t outer = final_size - kOuterHeader;
     std::memcpy(out.data() + 8, &outer, sizeof(outer));
     return true;
@@ -368,6 +414,7 @@ inline bool BuildTemporalFatbin(const uint8_t* fat, size_t fat_size,
 void Log(const wchar_t* format, ...);
 static std::atomic<bool> gMvDilationDisabled{false};
 static std::atomic<bool> gQualityFixEnabled{true};
+static std::atomic<bool> gQualityPolicyExplainedWarp{true};
 
 inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
                                            const char* kernel_name,
@@ -408,7 +455,9 @@ inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
         && gQualityFixEnabled.load(std::memory_order_relaxed))
     {
         std::string quality_status;
-        const bool patched = quality_fix::Patch(ptx_text, quality_status);
+        const bool patched = quality_fix::Patch(ptx_text, quality_status,
+            gQualityPolicyExplainedWarp.load(std::memory_order_relaxed)
+                ? quality_fix::Policy::ExplainedWarp : quality_fix::Policy::Transfusion);
         Log(L"Quality PTX preparation: %hs (patched=%d)", quality_status.c_str(), patched);
     }
     if (kernel_name && std::strcmp(kernel_name, "Kernel_EstimateIntermMvecsScatter") == 0
@@ -437,7 +486,8 @@ inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
     size_t after = target_pos + sizeof(".target sm_120") - 1;
     while (after < ptx_text.size() && (ptx_text[after] == '\r' || ptx_text[after] == '\n' || ptx_text[after] == ' '))
         ++after;
-    ptx_text.replace(target_pos, after - target_pos, ".target sm_89\n");
+    const uint32_t target_sm = gTargetSm.load(std::memory_order_relaxed);
+    ptx_text.replace(target_pos, after - target_pos, ".target sm_" + std::to_string(target_sm) + "\n");
 
     // Preserve the provider's scatter rejection and spatial bounds checks.
     // The former regex bypass removed depth/motion consistency branches, not
@@ -459,6 +509,8 @@ inline bool BuildBlackwellTransfusionFatbin(const uint8_t* fat, size_t fat_size,
     std::memcpy(out.data() + ada_entry + 16, &zero32, sizeof(zero32));
     std::memcpy(out.data() + ada_entry + 40, &kUncompressedFlags, sizeof(kUncompressedFlags));
     std::memcpy(out.data() + ada_entry + 56, &zero64, sizeof(zero64));
+    // The rewritten entry replaces the Ada PTX; label it for the target SM.
+    std::memcpy(out.data() + ada_entry + 28, &target_sm, sizeof(target_sm));
     const uint64_t outer = final_size - kOuterHeader;
     std::memcpy(out.data() + 8, &outer, sizeof(outer));
     return true;
@@ -486,18 +538,28 @@ inline std::string GetFatbinKernelName(const uint8_t* fat, size_t fat_size)
 }
 
 
-// Retargets all Blackwell kernel containers in the module to sm_89 in-place,
-// parking any obsolete Ada images at arch 122 so the driver selects the Blackwell build.
+// Retargets kernel containers in-place so the driver compiles their PTX for
+// the target SM. The .target directive sits in an LZ4 literal run in every
+// container of the supported providers, so a same-length rewrite is enough.
+//
+// Ada (Transfusion's original path): every container holding a Blackwell
+// sm_120 PTX is relabelled sm_89 and its Ada images are parked at arch 122,
+// so the driver JIT-compiles the Blackwell build instead of the Ada SASS.
+//
+// Below Ada no container has a usable image: the provider ships Ada/Blackwell
+// SASS and PTX only. Every container therefore gets one PTX relabelled to the
+// target SM (the Blackwell build when preferred and present, else the Ada
+// PTX) and every other image parked, including the Ada-only network modules.
 // Returns the number of retargeted kernel containers.
-static unsigned int RetargetAllBlackwellContainers(uint8_t* base, size_t image_size,
-                                                   uint16_t num_sections,
-                                                   const IMAGE_SECTION_HEADER* section)
+static unsigned int RetargetContainers(uint8_t* base, size_t image_size,
+                                       uint16_t num_sections,
+                                       const IMAGE_SECTION_HEADER* section,
+                                       bool prefer_blackwell, uint32_t target_sm)
 {
     unsigned int rewritten = 0;
-    constexpr uint32_t kArchParked = 122;
-    constexpr char from[] = ".target sm_120";
-    constexpr char to[]   = ".target sm_89 ";
-    static_assert(sizeof(from) == sizeof(to), "directive rewrite must be identical length");
+    const bool pre_ada = target_sm < kAdaArch;
+    char target[16]{};
+    std::snprintf(target, sizeof(target), "sm_%u", target_sm);
 
     for (WORD i = 0; i < num_sections; ++i, ++section)
     {
@@ -526,66 +588,64 @@ static unsigned int RetargetAllBlackwellContainers(uint8_t* base, size_t image_s
             }
 
             const size_t totalContainerBytes = static_cast<size_t>(fatSize) + 16;
-            uint8_t* blackwell_image = nullptr;
-            size_t blackwell_hdr = 0;
-            size_t blackwell_payload = 0;
-            std::vector<uint8_t*> ada_images;
-
+            struct Image { uint8_t* header; size_t hdr; size_t payload; uint16_t kind; uint32_t arch; };
+            std::vector<Image> images;
             for (uint8_t* img = c + 16; img + 32 <= c + totalContainerBytes;)
             {
-                const uint16_t kind = ReadU16(img);
                 const uint32_t imgHeader = ReadU32(img + 4);
                 const uint64_t payload = ReadU64(img + 8);
-                const uint32_t arch = ReadU32(img + 28);
                 const size_t imgRemain = static_cast<size_t>((c + totalContainerBytes) - img);
                 if (imgHeader < 32 || payload == 0 || imgHeader > imgRemain || payload > imgRemain - imgHeader)
                     break;
-
-                if (kind == kPtxKind && arch == kBlackwellArch)
-                {
-                    blackwell_image = img;
-                    blackwell_hdr = imgHeader;
-                    blackwell_payload = payload;
-                }
-                else if (arch == kAdaArch)
-                {
-                    ada_images.push_back(img);
-                }
-
+                images.push_back({img, imgHeader, static_cast<size_t>(payload), ReadU16(img), ReadU32(img + 28)});
                 img += imgHeader + payload;
             }
 
-            if (blackwell_image != nullptr && !ada_images.empty())
+            const Image* blackwell = nullptr;
+            const Image* ada = nullptr;
+            bool hasAdaImage = false;
+            for (const auto& image : images)
             {
-                uint8_t* body = blackwell_image + blackwell_hdr;
-                uint8_t* bodyEnd = body + blackwell_payload;
+                if (image.kind == kPtxKind && image.arch == kBlackwellArch) blackwell = &image;
+                if (image.kind == kPtxKind && image.arch == kAdaArch) ada = &image;
+                if (image.arch == kAdaArch) hasAdaImage = true;
+            }
+
+            const Image* chosen = nullptr;
+            if (!pre_ada)
+                chosen = hasAdaImage ? blackwell : nullptr;
+            else
+                chosen = (prefer_blackwell && blackwell) ? blackwell : ada;
+
+            if (chosen)
+            {
+                // Same-length directive rewrite: "sm_120" -> "sm_89 ", "sm_89" -> "sm_86".
+                char from[24]{}, to[24]{};
+                std::snprintf(from, sizeof(from), ".target sm_%u", chosen->arch);
+                std::snprintf(to, sizeof(to), ".target %-*s", static_cast<int>(std::strlen(from) - 8), target);
+                uint8_t* body = chosen->header + chosen->hdr;
+                uint8_t* bodyEnd = body + chosen->payload;
+                const size_t fromLength = std::strlen(from);
                 auto at = std::search(body, bodyEnd, reinterpret_cast<const uint8_t*>(from),
-                                      reinterpret_cast<const uint8_t*>(from) + sizeof(from) - 1);
-                if (at != bodyEnd)
+                                      reinterpret_cast<const uint8_t*>(from) + fromLength);
+                DWORD oldProtect = 0;
+                if (at != bodyEnd && std::strlen(to) == fromLength
+                    && VirtualProtect(c, totalContainerBytes, PAGE_READWRITE, &oldProtect))
                 {
-                    DWORD oldProtect = 0;
-                    if (VirtualProtect(c, totalContainerBytes, PAGE_READWRITE, &oldProtect))
+                    std::memcpy(at, to, fromLength);
+                    std::memcpy(chosen->header + 28, &target_sm, sizeof(target_sm));
+                    for (const auto& image : images)
                     {
-                        // 1. Rewrite .target sm_120 -> .target sm_89 
-                        std::memcpy(at, to, sizeof(to) - 1);
-
-                        // 2. Relabel Blackwell image header arch: 120 -> 89
-                        const uint32_t newArch = kAdaArch;
-                        std::memcpy(blackwell_image + 28, &newArch, sizeof(newArch));
-
-                        // 3. Park existing Ada images: 89 -> 122
-                        const uint32_t parkedArch = kArchParked;
-                        for (uint8_t* img : ada_images)
-                        {
-                            std::memcpy(img + 28, &parkedArch, sizeof(parkedArch));
-                        }
-                        DWORD ignored = 0;
-                        VirtualProtect(c, totalContainerBytes, oldProtect, &ignored);
-                        FlushInstructionCache(GetCurrentProcess(), c, totalContainerBytes);
-                        ++rewritten;
-                        c += totalContainerBytes;
-                        continue;
+                        if (&image == chosen) continue;
+                        if (pre_ada || image.arch == kAdaArch)
+                            std::memcpy(image.header + 28, &kArchParked, sizeof(kArchParked));
                     }
+                    DWORD ignored = 0;
+                    VirtualProtect(c, totalContainerBytes, oldProtect, &ignored);
+                    FlushInstructionCache(GetCurrentProcess(), c, totalContainerBytes);
+                    ++rewritten;
+                    c += totalContainerBytes;
+                    continue;
                 }
             }
             c += 4;
@@ -687,6 +747,31 @@ void SetLogCallback(LogCallback callback) noexcept
 void SetBlackwellTransfusionEnabled(bool enabled) noexcept
 {
     gBlackwellTransfusionEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+void SetOptimizedKernels(bool enabled) noexcept
+{
+    gOptimizedKernels.store(enabled, std::memory_order_relaxed);
+}
+
+bool OptimizedKernelsEnabled() noexcept
+{
+    return gOptimizedKernels.load(std::memory_order_relaxed);
+}
+
+bool ExactProviderKernels() noexcept
+{
+    return gExactProviderKernels.load(std::memory_order_acquire);
+}
+
+void SetTargetSm(uint32_t sm) noexcept
+{
+    gTargetSm.store(sm, std::memory_order_relaxed);
+}
+
+void SetQualityPolicyExplainedWarp(bool explainedWarp) noexcept
+{
+    gQualityPolicyExplainedWarp.store(explainedWarp, std::memory_order_relaxed);
 }
 
 void SetQualityFixEnabled(bool enabled) noexcept
@@ -854,6 +939,135 @@ static bool SafeValidateFatbinCandidate(const uint8_t* candidate, size_t max_byt
     }
 }
 
+static bool SafeCopyBlob(const void* blob, size_t size, std::vector<uint8_t>& out) noexcept
+{
+    __try
+    {
+        std::memcpy(out.data(), blob, size);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+bool PrepareModuleImage(const void* blob, size_t size, std::vector<uint8_t>& replacement) noexcept
+{
+    const uint32_t target_sm = gTargetSm.load(std::memory_order_relaxed);
+    const bool lower = target_sm < 80;
+    const bool optimize = gOptimizedKernels.load(std::memory_order_relaxed);
+    if ((!lower && !optimize) || !blob) return false;
+    try
+    {
+        // The in-place retarget cannot grow the compressed PTX, so the exact
+        // image-kernel optimizations and Turing's lowering happen here, on the
+        // image the provider hands to the driver.
+        std::vector<uint8_t> fat(kOuterHeader);
+        if (!SafeCopyBlob(blob, kOuterHeader, fat) || ReadU32(fat.data()) != kFatbinMagic
+            || ReadU16(fat.data() + 6) != kOuterHeader)
+            return false;
+        // The size the provider passes is its descriptor's, which still
+        // describes the original image when Transfusion redirected the pointer
+        // to a larger rebuilt fatbin; the driver follows the fatbin header.
+        (void)size;
+        const uint64_t total = ReadU64(fat.data() + 8) + kOuterHeader;
+        if (total > (16u << 20)) return false;
+        fat.resize(static_cast<size_t>(total));
+        if (!SafeCopyBlob(blob, fat.size(), fat)) return false;
+
+        for (size_t p = kOuterHeader; p + 64 <= fat.size();)
+        {
+            const uint16_t kind = ReadU16(fat.data() + p);
+            const uint32_t hdr = ReadU32(fat.data() + p + 4);
+            const uint64_t payload = ReadU64(fat.data() + p + 8);
+            if (hdr < 64 || payload == 0 || hdr > fat.size() - p || payload > fat.size() - p - hdr) return false;
+            if (kind != kPtxKind || ReadU32(fat.data() + p + 28) != target_sm)
+            {
+                p += hdr + payload;
+                continue;
+            }
+
+            const uint32_t compressed = ReadU32(fat.data() + p + 16);
+            const uint64_t raw = ReadU64(fat.data() + p + 56);
+            std::string text;
+            if (compressed)
+            {
+                if (raw == 0 || raw > (8u << 20) || compressed > payload) return false;
+                text.resize(static_cast<size_t>(raw));
+                if (!Lz4BlockDecompress(fat.data() + p + hdr, compressed,
+                        reinterpret_cast<uint8_t*>(text.data()), text.size()))
+                    return false;
+            }
+            else
+            {
+                text.assign(reinterpret_cast<const char*>(fat.data() + p + hdr), static_cast<size_t>(payload));
+            }
+            while (!text.empty() && text.back() == '\0') text.pop_back();
+
+            const char* optimized = nullptr;
+            if (optimize)
+            {
+                const std::string entry = GetPtxEntryName(text);
+                if (entry == "Kernel_OutputPull" || entry == "Kernel_OutputPushFine")
+                {
+                    const bool pull = entry == "Kernel_OutputPull";
+                    if (image_kernels::SourceHash(text)
+                        == (pull ? image_kernels::kOutputPullSourceHash : image_kernels::kOutputPushFineSourceHash))
+                    {
+                        gExactProviderKernels.store(true, std::memory_order_release);
+                        if (image_kernels::kHaveReplacements)
+                        {
+                            text.assign(pull ? image_kernels::kOutputPull : image_kernels::kOutputPushFine);
+                            RetargetPtxText(text, target_sm);
+                            optimized = pull ? "OutputPull (packed row masks)" : "OutputPushFine (early block exit)";
+                        }
+                    }
+                }
+                else if (entry == "Kernel_BlendCandidatesFused" && image_kernels::VectorizeBlendStores(text))
+                {
+                    optimized = "BlendCandidatesFused (vector stores)";
+                }
+            }
+
+            ptx_lowering::Stats stats;
+            const bool lowered = lower && ptx_lowering::NeedsSm75Lowering(text);
+            if (lowered && !ptx_lowering::LowerToSm75(text, stats))
+            {
+                Log(L"sm_75 lowering: unsupported instruction form; image left unchanged");
+                return false;
+            }
+            if (!optimized && !lowered) return false;
+            if (optimized) Log(L"Optimized image kernel: %hs for sm_%u", optimized, target_sm);
+
+            // One uncompressed PTX entry for the target SM.
+            const size_t padded = (text.size() + 1 + 7) & ~size_t{7};
+            replacement.assign(fat.begin(), fat.begin() + kOuterHeader);
+            replacement.insert(replacement.end(), fat.begin() + p, fat.begin() + p + hdr);
+            replacement.resize(kOuterHeader + hdr + padded, 0);
+            std::memcpy(replacement.data() + kOuterHeader + hdr, text.data(), text.size());
+            uint8_t* entry = replacement.data() + kOuterHeader;
+            const uint64_t payload64 = padded;
+            const uint32_t zero32 = 0;
+            const uint64_t zero64 = 0;
+            std::memcpy(entry + 8, &payload64, sizeof(payload64));
+            std::memcpy(entry + 16, &zero32, sizeof(zero32));
+            std::memcpy(entry + 40, &kUncompressedFlags, sizeof(kUncompressedFlags));
+            std::memcpy(entry + 56, &zero64, sizeof(zero64));
+            const uint64_t outer = replacement.size() - kOuterHeader;
+            std::memcpy(replacement.data() + 8, &outer, sizeof(outer));
+            if (lowered)
+                Log(L"sm_75 lowering: %zu mma, %zu cvt, %zu min/max rewritten (%zu -> %zu bytes of PTX)",
+                    stats.mma, stats.cvt, stats.minmax, static_cast<size_t>(compressed ? raw : payload), text.size());
+            return true;
+        }
+    }
+    catch (...)
+    {
+    }
+    return false;
+}
+
 bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 {
     if (!module) return false;
@@ -995,10 +1209,12 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
 
         if (!all_patches.empty())
         {
-            // Retarget all remaining Blackwell containers in-place so the entire pipeline
-            // (Kernel_BlendCandidatesFused, Pyramids, Tensor feeds, etc.) runs sm_89 Blackwell code.
+            // Retarget all remaining containers in-place so the entire pipeline
+            // (Kernel_BlendCandidatesFused, Pyramids, Tensor feeds, etc.) runs Blackwell code
+            // compiled for the target SM; below Ada this also covers the Ada-only network.
+            const uint32_t target_sm = gTargetSm.load(std::memory_order_relaxed);
             const unsigned int retargeted_count =
-                RetargetAllBlackwellContainers(base, image_size, num_sections, first_section);
+                RetargetContainers(base, image_size, num_sections, first_section, true, target_sm);
 
             const size_t total_descriptors = all_patches.size();
             gBlackwellTransfusionActive.store(true, std::memory_order_release);
@@ -1008,8 +1224,8 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
             gReady.store(true, std::memory_order_release);
             gFailureCode.store(0, std::memory_order_release);
 
-            Log(L"D157 midpoint fix: %u Blackwell container(s) retargeted in-place (sm_120 -> sm_89), %zu descriptor(s) redirected; scatter=%hs in %s",
-                retargeted_count, total_descriptors, scatter_experiment::kPolicy, path ? path : L"");
+            Log(L"D157 midpoint fix: %u container(s) retargeted in-place (Blackwell preferred -> sm_%u), %zu descriptor(s) redirected; scatter=%hs in %s",
+                retargeted_count, target_sm, total_descriptors, scatter_experiment::kPolicy, path ? path : L"");
             return true;
         }
     }
@@ -1024,16 +1240,32 @@ bool PatchProvider(HMODULE module, const wchar_t* path) noexcept
     gTransfusedFatbinCount.store(0, std::memory_order_release);
     gTransfusedDescriptorCount.store(0, std::memory_order_release);
 
-    if (legacy_temporal_fat == nullptr || legacy_slots.empty() || legacy_profile == nullptr)
+    const bool has_temporal = legacy_temporal_fat != nullptr && !legacy_slots.empty() && legacy_profile != nullptr;
+    std::vector<uint8_t> rebuilt;
+    std::string why;
+    const bool built = has_temporal
+        && BuildTemporalFatbin(legacy_temporal_fat, legacy_temporal_fat_size, *legacy_profile, rebuilt, why);
+
+    // Below Ada nothing in the provider is loadable as shipped. Retarget every
+    // container (after the temporal rebuild read its original Ada PTX) even
+    // when the midpoint fix fails, so native 2x frame generation still runs.
+    const uint32_t target_sm = gTargetSm.load(std::memory_order_relaxed);
+    if (target_sm < kAdaArch)
+    {
+        const unsigned int retargeted_count =
+            RetargetContainers(base, image_size, num_sections, first_section, false, target_sm);
+        Log(L"D157 midpoint fix: %u container(s) retargeted in-place (Ada PTX -> sm_%u) in %s",
+            retargeted_count, target_sm, path ? path : L"");
+    }
+
+    if (!has_temporal)
     {
         Log(L"D157 midpoint fix: no supported temporal descriptor found in %s", path ? path : L"");
         gFailureCode.store(4, std::memory_order_release); // Layout
         return false;
     }
 
-    std::vector<uint8_t> rebuilt;
-    std::string why;
-    if (!BuildTemporalFatbin(legacy_temporal_fat, legacy_temporal_fat_size, *legacy_profile, rebuilt, why))
+    if (!built)
     {
         Log(L"D157 midpoint fix: fatbin rebuild failed in %s (%hs)", path ? path : L"", why.c_str());
         gFailureCode.store(6, std::memory_order_release);

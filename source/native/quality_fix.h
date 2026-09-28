@@ -4,8 +4,18 @@
 #include <string>
 #include <string_view>
 
+#include "quality_explained_warp.h"
+
 namespace quality_fix
 {
+// Valid-warp policy (technique invented by Tony Joaca for Transfusion) inserted
+// before the UIR flag load; restart required to change.
+enum class Policy : uint8_t
+{
+    Transfusion,   // Tony's own tuning, QUALITY_VALID_WARP_V4: warped candidates agree (default)
+    ExplainedWarp, // dlssg_for_sm86's tuning (its V3): the warp explains the frame change
+};
+
 // Registers for thin-geometry protection with tuned shadow rejection
 // RenoDx Release 1.0 Validated Warp Blend: dual-track confidence boost and thin geometry recovery
 inline constexpr std::string_view kRegisters = R"ptx(
@@ -126,7 +136,7 @@ inline bool ReplaceOnce(std::string& text, const std::string_view from, const st
     return true;
 }
 
-inline bool Patch(std::string& ptx, std::string& why)
+inline bool Patch(std::string& ptx, std::string& why, Policy policy = Policy::Transfusion)
 {
     std::string normalized = ptx;
     normalized.erase(std::remove(normalized.begin(), normalized.end(), '\r'), normalized.end());
@@ -147,8 +157,15 @@ inline bool Patch(std::string& ptx, std::string& why)
         return false;
     }
 
-    normalized.insert(site, kPolicy);
-    normalized.insert(registers, kRegisters);
+    // Both policies read the same registers at the same point; explained-warp
+    // declares its temporaries in its own scope, Transfusion at function scope.
+    if (policy == Policy::ExplainedWarp)
+        normalized.insert(site, kPolicyExplainedWarp);
+    else
+    {
+        normalized.insert(site, kPolicy);
+        normalized.insert(registers, kRegisters);
+    }
 
     // Fast reciprocal for UI chroma average (div by 3.0f -> mul by 0.33333334f)
     ReplaceOnce(normalized,
@@ -261,7 +278,9 @@ inline bool Patch(std::string& ptx, std::string& why)
         "mul.ftz.f32 %f332, %f91, %f333;");
 
     ptx = std::move(normalized);
-    why = "precision-tuned thin-geometry protection and SFU reciprocal optimizations applied";
+    why = policy == Policy::ExplainedWarp
+        ? "explained-warp policy (dlssg_for_sm86 V3) and SFU reciprocal optimizations applied"
+        : "precision-tuned thin-geometry protection and SFU reciprocal optimizations applied";
     return true;
 }
 }

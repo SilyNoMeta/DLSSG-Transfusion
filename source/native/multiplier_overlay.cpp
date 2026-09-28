@@ -6,7 +6,10 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
+#include <algorithm>
+#include <cmath>
 #include <array>
+#include <cwchar>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -35,6 +38,8 @@ Present1 gPresent1{};
 ResizeBuffers gResizeBuffers{};
 std::atomic<bool> gInstalled{false};
 std::atomic<bool> gVisible{false};
+std::atomic<ExtraLinesFn> gExtraLines{nullptr};
+std::atomic<uint64_t> gLastDrawTick{0};
 std::atomic<uint32_t> gPosition{static_cast<uint32_t>(Position::TopLeft)};
 const std::atomic<uint32_t>* gActual{};
 const std::atomic<uint32_t>* gApplied{};
@@ -43,12 +48,21 @@ const std::atomic<uint64_t>* gFgSession{};
 const std::atomic<uint64_t>* gSampleTick{};
 std::mutex gMutex;
 thread_local bool gInsidePresent{};
+LogFn gLog{};
 
 struct Vertex { float x, y; float r, g, b, a; };
 
+struct PacingAtomics
+{
+    std::atomic<bool> valid{false};
+    std::atomic<uint32_t> averageUs{0}, p99Us{0}, jitterUs{0};
+    std::atomic<uint64_t> tick{0};
+};
+PacingAtomics gPacing;
+
 struct Context
 {
-    static constexpr UINT64 kVertexBufferBytes = 192u * 1024u;
+    static constexpr UINT64 kVertexBufferBytes = 1024u * 1024u;  // room for the optional info lines
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
@@ -67,6 +81,11 @@ struct Context
     LARGE_INTEGER fpsWindowStart{};
     uint64_t presentsInWindow{};
     uint32_t presentedFpsMilli{};
+    // Frame pacing of displayed frames (generated ones included).
+    LARGE_INTEGER lastPresent{};
+    std::array<float, 512> intervalsUs{};
+    size_t intervalCount{};
+    size_t intervalHead{};
     bool frameGenerationWasOn{};
     uint64_t observedFgSession{};
     uint64_t fgSessionReadyTick{};
@@ -79,6 +98,12 @@ struct Context
     uint64_t firstSuccessfulPresentTick{};
     uint32_t successfulPresents{};
     uint64_t lastInitializationAttemptTick{};
+    // Created by a Vulkan or OpenGL driver to present a game that does not use
+    // DXGI itself. The driver recreates it when the game rebuilds its Vulkan
+    // swapchain (loading, a new multiplier); references held on its buffers,
+    // device or queue broke that in DOOM: The Dark Ages. Only its presents are
+    // measured (frame pacing); the ReShade add-on draws the overlay instead.
+    bool external{};
 };
 std::unordered_map<IDXGISwapChain*, Context> gContexts;
 
@@ -92,6 +117,18 @@ void ReleaseRendererResources(Context& c)
     c.rtvHeap.Reset(); c.fence.Reset(); c.device.Reset();
     if(c.fenceEvent) { CloseHandle(c.fenceEvent); c.fenceEvent=nullptr; }
     c.ready=false;
+}
+
+void WaitForOverlaySubmissions(Context& c)
+{
+    for(UINT64 value:c.fenceValues) {
+        if(value && c.fence && c.fence->GetCompletedValue()<value) {
+            if(c.fenceEvent) {
+                c.fence->SetEventOnCompletion(value,c.fenceEvent);
+                WaitForSingleObject(c.fenceEvent,1000);
+            }
+        }
+    }
 }
 
 template<typename T> T Slot(void* object, size_t index)
@@ -110,12 +147,11 @@ void AddRect(std::vector<Vertex>& out, float x0, float y0, float x1, float y1,
     out.insert(out.end(), {a,e,c,a,c,d});
 }
 
-void AddGlyph(std::vector<Vertex>& v, char glyph, float x, float y, float scale,
-    float targetW, float targetH)
+const uint8_t* GlyphRows(char glyph)
 {
     // Five-by-seven sans bitmap glyphs. At 1.5 px per cell they remain crisp and
     // much less visually dominant than the old seven-segment display.
-    static constexpr uint8_t rows[][7] = {
+    static constexpr uint8_t digits[][7] = {
         {0x0e,0x11,0x13,0x15,0x19,0x11,0x0e}, // 0
         {0x04,0x0c,0x04,0x04,0x04,0x04,0x0e}, // 1
         {0x0e,0x11,0x01,0x02,0x04,0x08,0x1f}, // 2
@@ -126,19 +162,69 @@ void AddGlyph(std::vector<Vertex>& v, char glyph, float x, float y, float scale,
         {0x1f,0x01,0x02,0x04,0x08,0x08,0x08}, // 7
         {0x0e,0x11,0x11,0x0e,0x11,0x11,0x0e}, // 8
         {0x0e,0x11,0x11,0x0f,0x01,0x01,0x0e}, // 9
-        {0x01,0x02,0x02,0x04,0x08,0x08,0x10}, // /
-        {0x00,0x00,0x11,0x0a,0x04,0x0a,0x11}, // x
-        {0x06,0x08,0x08,0x1e,0x08,0x08,0x08}, // f
-        {0x00,0x00,0x1e,0x11,0x1e,0x10,0x10}, // p
-        {0x00,0x00,0x0f,0x10,0x0e,0x01,0x1e}  // s
     };
-    const size_t index = glyph == 'x' ? 11u : glyph == 'f' ? 12u
-        : glyph == 'p' ? 13u : glyph == 's' ? 14u : glyph == '/' ? 10u
-        : static_cast<size_t>(glyph - '0');
-    if (index > 14) return;
+    static constexpr uint8_t letters[][7] = {
+        {0x0e,0x11,0x11,0x1f,0x11,0x11,0x11}, // A
+        {0x1e,0x11,0x11,0x1e,0x11,0x11,0x1e}, // B
+        {0x0e,0x11,0x10,0x10,0x10,0x11,0x0e}, // C
+        {0x1c,0x12,0x11,0x11,0x11,0x12,0x1c}, // D
+        {0x1f,0x10,0x10,0x1e,0x10,0x10,0x1f}, // E
+        {0x1f,0x10,0x10,0x1e,0x10,0x10,0x10}, // F
+        {0x0e,0x11,0x10,0x17,0x11,0x11,0x0f}, // G
+        {0x11,0x11,0x11,0x1f,0x11,0x11,0x11}, // H
+        {0x0e,0x04,0x04,0x04,0x04,0x04,0x0e}, // I
+        {0x07,0x02,0x02,0x02,0x02,0x12,0x0c}, // J
+        {0x11,0x12,0x14,0x18,0x14,0x12,0x11}, // K
+        {0x10,0x10,0x10,0x10,0x10,0x10,0x1f}, // L
+        {0x11,0x1b,0x15,0x15,0x11,0x11,0x11}, // M
+        {0x11,0x11,0x19,0x15,0x13,0x11,0x11}, // N
+        {0x0e,0x11,0x11,0x11,0x11,0x11,0x0e}, // O
+        {0x1e,0x11,0x11,0x1e,0x10,0x10,0x10}, // P
+        {0x0e,0x11,0x11,0x11,0x15,0x12,0x0d}, // Q
+        {0x1e,0x11,0x11,0x1e,0x14,0x12,0x11}, // R
+        {0x0f,0x10,0x10,0x0e,0x01,0x01,0x1e}, // S
+        {0x1f,0x04,0x04,0x04,0x04,0x04,0x04}, // T
+        {0x11,0x11,0x11,0x11,0x11,0x11,0x0e}, // U
+        {0x11,0x11,0x11,0x11,0x11,0x0a,0x04}, // V
+        {0x11,0x11,0x11,0x15,0x15,0x15,0x0a}, // W
+        {0x11,0x11,0x0a,0x04,0x0a,0x11,0x11}, // X
+        {0x11,0x11,0x11,0x0a,0x04,0x04,0x04}, // Y
+        {0x1f,0x01,0x02,0x04,0x08,0x10,0x1f}, // Z
+    };
+    static constexpr uint8_t slash[7] = {0x01,0x02,0x02,0x04,0x08,0x08,0x10};
+    static constexpr uint8_t x[7] = {0x00,0x00,0x11,0x0a,0x04,0x0a,0x11};
+    static constexpr uint8_t f[7] = {0x06,0x08,0x08,0x1e,0x08,0x08,0x08};
+    static constexpr uint8_t p[7] = {0x00,0x00,0x1e,0x11,0x1e,0x10,0x10};
+    static constexpr uint8_t s[7] = {0x00,0x00,0x0f,0x10,0x0e,0x01,0x1e};
+    static constexpr uint8_t dot[7] = {0x00,0x00,0x00,0x00,0x00,0x0c,0x0c};
+    static constexpr uint8_t colon[7] = {0x00,0x0c,0x0c,0x00,0x0c,0x0c,0x00};
+    static constexpr uint8_t dash[7] = {0x00,0x00,0x00,0x1f,0x00,0x00,0x00};
+    static constexpr uint8_t percent[7] = {0x18,0x19,0x02,0x04,0x08,0x13,0x03};
+    if (glyph >= '0' && glyph <= '9') return digits[glyph - '0'];
+    if (glyph >= 'A' && glyph <= 'Z') return letters[glyph - 'A'];
+    switch (glyph)
+    {
+    case '/': return slash;
+    case 'x': return x;
+    case 'f': return f;
+    case 'p': return p;
+    case 's': return s;
+    case '.': return dot;
+    case ':': return colon;
+    case '-': return dash;
+    case '%': return percent;
+    default: return nullptr;
+    }
+}
+
+void AddGlyph(std::vector<Vertex>& v, char glyph, float x, float y, float scale,
+    float targetW, float targetH)
+{
+    const uint8_t* rows = GlyphRows(glyph);
+    if (!rows) return;
     for (int row=0; row<7; ++row)
         for (int col=0; col<5; ++col)
-            if (rows[index][row] & (0x10 >> col))
+            if (rows[row] & (0x10 >> col))
                 AddRect(v,x+col*scale,y+row*scale,x+(col+1)*scale,y+(row+1)*scale,
                     targetW,targetH,.94f,.96f,1.f,.96f);
 }
@@ -258,7 +344,7 @@ void ObserveSuccessfulPresent(IDXGISwapChain* swapChain, HRESULT result)
         // or submitting work during that phase can lock the engine and another
         // DXGI interceptor against each other. Arm only after the real swapchain
         // has demonstrably presented normally for a while.
-        initialize=!c.ready && !c.initializing && c.successfulPresents>=120
+        initialize=!c.external && !c.ready && !c.initializing && c.successfulPresents>=120
             && now-c.firstSuccessfulPresentTick>=3000;
     }
     if(initialize) ScheduleContextInitialization(swapChain);
@@ -277,7 +363,7 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     auto it=gContexts.find(swapChain); if(it==gContexts.end()) return; Context& c=it->second;
     if(!fgOn) {
         c.frameGenerationWasOn=false; c.fpsWindowStart={}; c.presentsInWindow=0;
-        c.presentedFpsMilli=0; return;
+        c.presentedFpsMilli=0; c.lastPresent={}; c.intervalCount=0; gPacing.valid.store(false); return;
     }
     const uint64_t fgSession=gFgSession ? gFgSession->load(std::memory_order_acquire) : 0;
     if(!c.frameGenerationWasOn || c.observedFgSession!=fgSession) {
@@ -290,14 +376,38 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     if(frequency>0 && QueryPerformanceCounter(&now)) {
         if(!c.fpsWindowStart.QuadPart) c.fpsWindowStart=now;
         ++c.presentsInWindow;
+        if(c.lastPresent.QuadPart) {
+            const double us=double(now.QuadPart-c.lastPresent.QuadPart)*1e6/double(frequency);
+            if(us>0.0 && us<250000.0) {  // ignore stalls (loading, alt-tab)
+                c.intervalsUs[c.intervalHead]=float(us);
+                c.intervalHead=(c.intervalHead+1)%c.intervalsUs.size();
+                c.intervalCount=std::min(c.intervalCount+1,c.intervalsUs.size());
+            }
+        }
+        c.lastPresent=now;
         const uint64_t elapsed=static_cast<uint64_t>(now.QuadPart-c.fpsWindowStart.QuadPart);
         if(elapsed>=static_cast<uint64_t>(frequency)/2u) {
             c.presentedFpsMilli=static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX,
                 (c.presentsInWindow*static_cast<uint64_t>(frequency)*1000u+elapsed/2u)/elapsed));
             c.fpsWindowStart=now; c.presentsInWindow=0;
+            if(c.intervalCount>=16) {
+                // Twice a second: average, 99th percentile and standard deviation.
+                std::array<float,512> sorted{};
+                std::copy_n(c.intervalsUs.begin(),c.intervalCount,sorted.begin());
+                std::sort(sorted.begin(),sorted.begin()+c.intervalCount);
+                double sum=0.0, squares=0.0;
+                for(size_t k=0;k<c.intervalCount;++k){sum+=sorted[k];squares+=double(sorted[k])*sorted[k];}
+                const double mean=sum/double(c.intervalCount);
+                const double variance=std::max(0.0,squares/double(c.intervalCount)-mean*mean);
+                gPacing.averageUs.store(uint32_t(mean));
+                gPacing.p99Us.store(uint32_t(sorted[std::min(c.intervalCount-1,(c.intervalCount*99)/100)]));
+                gPacing.jitterUs.store(uint32_t(std::sqrt(variance)));
+                gPacing.tick.store(GetTickCount64());
+                gPacing.valid.store(true);
+            }
         }
     }
-    if(!gVisible.load()) return;
+    if(c.external || !gVisible.load()) return;
     // Loading screens commonly tear down and recreate the DLSS-G session while
     // keeping the DXGI swapchain alive. Let the new presentation pipeline settle
     // before placing any independent work on its queue.
@@ -320,13 +430,20 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     const uint32_t generatedMilli=c.presentedFpsMilli;
     const uint32_t generatedFps=(generatedMilli+500u)/1000u;
     const uint32_t baseFps=(generatedMilli+mult*500u)/(mult*1000u);
-    char label[32]{};
-    sprintf_s(label,"%u/%u fps %ux",generatedFps,baseFps,mult);
-    const float scale=2.f, advance=12.f;
+    char lines[1 + kMaxExtraLines][kExtraLineLength]{};
+    sprintf_s(lines[0],"%u/%u fps %ux",generatedFps,baseFps,mult);
+    size_t lineCount=1;
+    if(const auto provider=gExtraLines.load(std::memory_order_acquire))
+        lineCount+=std::min<size_t>(provider(lines+1,kMaxExtraLines),kMaxExtraLines);
+    const float scale=2.f, advance=12.f, lineHeight=17.f;
     float textWidth=0.f;
-    for(const char* p=label;*p;++p) textWidth+=(*p==' ' ? 6.f : advance);
+    for(size_t line=0; line<lineCount; ++line) {
+        float width=0.f;
+        for(const char* p=lines[line];*p;++p) width+=(*p==' ' ? 6.f : advance);
+        textWidth=std::max(textWidth,width);
+    }
     const auto d=c.buffers[i]->GetDesc(); if(d.Width==0 || d.Height==0) return; auto& vertices=c.vertices; vertices.clear();
-    const float panelW = textWidth + 8.f, panelH = 19.f, margin = 10.f;
+    const float panelW = textWidth + 8.f, panelH = 19.f + lineHeight*float(lineCount-1), margin = 10.f;
     const auto pos = static_cast<Position>(gPosition.load(std::memory_order_relaxed));
     float x = margin;
     float y = margin;
@@ -351,10 +468,13 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
         break;
     }
     AddRect(vertices, x, y, x + panelW, y + panelH, float(d.Width), float(d.Height), 0.f, 0.f, 0.f, .38f);
-    float glyphX = x + 4.f;
-    for (const char* p = label; *p; ++p) {
-        if (*p == ' ') glyphX += 6.f;
-        else { AddGlyph(vertices, *p, glyphX, y + 2.5f, scale, float(d.Width), float(d.Height)); glyphX += advance; }
+    for (size_t line = 0; line < lineCount; ++line) {
+        float glyphX = x + 4.f;
+        const float glyphY = y + 2.5f + lineHeight * float(line);
+        for (const char* p = lines[line]; *p; ++p) {
+            if (*p == ' ') glyphX += 6.f;
+            else { AddGlyph(vertices, *p, glyphX, glyphY, scale, float(d.Width), float(d.Height)); glyphX += advance; }
+        }
     }
     // Never stall Present waiting for overlay work. If this backbuffer is still
     // busy, skip one indicator update and let the game continue presenting.
@@ -363,6 +483,7 @@ void Draw(IDXGISwapChain* swapChain, UINT presentFlags)
     memcpy(c.mappedUploads[i],vertices.data(),size_t(bytes));
     if(FAILED(c.allocators[i]->Reset()) || FAILED(c.list->Reset(c.allocators[i].Get(),c.pipeline.Get()))) return; D3D12_RESOURCE_BARRIER b{D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,D3D12_RESOURCE_BARRIER_FLAG_NONE}; b.Transition={c.buffers[i].Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET}; c.list->ResourceBarrier(1,&b);
     auto rtv=c.rtvHeap->GetCPUDescriptorHandleForHeapStart(); rtv.ptr+=SIZE_T(i)*c.rtvStep; c.list->OMSetRenderTargets(1,&rtv,FALSE,nullptr); D3D12_VIEWPORT vp{0,0,float(d.Width),float(d.Height),0,1}; D3D12_RECT sr{0,0,LONG(d.Width),LONG(d.Height)}; c.list->RSSetViewports(1,&vp); c.list->RSSetScissorRects(1,&sr); c.list->SetGraphicsRootSignature(c.rootSignature.Get()); c.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST); D3D12_VERTEX_BUFFER_VIEW vb{c.uploads[i]->GetGPUVirtualAddress(),UINT(bytes),sizeof(Vertex)}; c.list->IASetVertexBuffers(0,1,&vb); c.list->DrawInstanced(UINT(vertices.size()),1,0,0); std::swap(b.Transition.StateBefore,b.Transition.StateAfter); c.list->ResourceBarrier(1,&b); if(FAILED(c.list->Close()))return; ID3D12CommandList* lists[]={c.list.Get()}; c.queue->ExecuteCommandLists(1,lists);const UINT64 fv=c.nextFenceValue++;if(SUCCEEDED(c.queue->Signal(c.fence.Get(),fv)))c.fenceValues[i]=fv;
+    gLastDrawTick.store(GetTickCount64(),std::memory_order_release);
 }
 
 struct PresentScope
@@ -393,16 +514,9 @@ HRESULT STDMETHODCALLTYPE HookResize(IDXGISwapChain* s,UINT a,UINT b,UINT c,DXGI
     {
         std::lock_guard l(gMutex);
         auto i=gContexts.find(s);
-        if(i==gContexts.end()) return gResizeBuffers(s,a,b,c,d,e);
+        if(i==gContexts.end() || i->second.external) return gResizeBuffers(s,a,b,c,d,e);
         Context& old=i->second;
-        for(UINT64 value:old.fenceValues) {
-            if(value && old.fence && old.fence->GetCompletedValue()<value) {
-                if(old.fenceEvent) {
-                    old.fence->SetEventOnCompletion(value,old.fenceEvent);
-                    WaitForSingleObject(old.fenceEvent,1000);
-                }
-            }
-        }
+        WaitForOverlaySubmissions(old);
         queue=old.queue;
         ReleaseRendererResources(old);
         gContexts.erase(i);
@@ -414,11 +528,54 @@ HRESULT STDMETHODCALLTYPE HookResize(IDXGISwapChain* s,UINT a,UINT b,UINT c,DXGI
     return hr;
 }
 
+// True when a graphics driver's Vulkan or OpenGL implementation is creating
+// the swapchain (the NVIDIA driver presents Vulkan games through DXGI).
+bool CreatedByGraphicsDriver(wchar_t* moduleName, size_t moduleNameLength)
+{
+    void* frames[48]{};
+    const USHORT count=RtlCaptureStackBackTrace(0,48,frames,nullptr);
+    for(USHORT k=0;k<count;++k) {
+        HMODULE module{};
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCWSTR>(frames[k]),&module) || !module) continue;
+        wchar_t path[MAX_PATH]{};
+        if(!GetModuleFileNameW(module,path,MAX_PATH)) continue;
+        const wchar_t* name=wcsrchr(path,L'\\'); name=name?name+1:path;
+        const size_t length=wcslen(name);
+        const bool intelIcd=length>9 && _wcsnicmp(name,L"ig",2)==0 && _wcsicmp(name+length-9,L"icd64.dll")==0;
+        if(intelIcd || _wcsicmp(name,L"vulkan-1.dll")==0 || _wcsicmp(name,L"opengl32.dll")==0
+            || _wcsicmp(name,L"nvoglv64.dll")==0 || _wcsicmp(name,L"amdvlk64.dll")==0
+            || _wcsicmp(name,L"atio6axx.dll")==0 || _wcsicmp(name,L"igvk64.dll")==0) {
+            wcsncpy_s(moduleName,moduleNameLength,name,_TRUNCATE);
+            return true;
+        }
+    }
+    return false;
+}
+
 void Track(IDXGISwapChain* s,IUnknown* device)
 {
-    if(!s||!device)return; ComPtr<ID3D12CommandQueue> q; if(FAILED(device->QueryInterface(IID_PPV_ARGS(&q))))return;
-    if(q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
-    {std::lock_guard l(gMutex);auto& c=gContexts[s];c.queue=q;}
+    if(!s||!device)return;
+    wchar_t driver[MAX_PATH]{};
+    const bool external=CreatedByGraphicsDriver(driver,MAX_PATH);
+    ComPtr<ID3D12CommandQueue> q;
+    if(!external) {
+        if(FAILED(device->QueryInterface(IID_PPV_ARGS(&q))))return;
+        if(q->GetDesc().Type!=D3D12_COMMAND_LIST_TYPE_DIRECT)return;
+    }
+    {
+        // A new swapchain can reuse the address of a released one: start from a
+        // clean context rather than the previous swapchain's buffers.
+        std::lock_guard l(gMutex);
+        if(auto it=gContexts.find(s); it!=gContexts.end()) { WaitForOverlaySubmissions(it->second); ReleaseRendererResources(it->second); gContexts.erase(it); }
+        Context fresh; fresh.queue=q; fresh.external=external;
+        gContexts.emplace(s,std::move(fresh));
+    }
+    if(external && gLog) {
+        char text[160]{};
+        sprintf_s(text,"Native overlay: swapchain created by %ls (Vulkan/OpenGL), frame pacing only; the ReShade add-on draws the overlay",driver);
+        gLog(text);
+    }
     if(gPresent)return; gPresent=Slot<Present>(s,8); gResizeBuffers=Slot<ResizeBuffers>(s,13); ComPtr<IDXGISwapChain1> s1;if(SUCCEEDED(s->QueryInterface(IID_PPV_ARGS(&s1))))gPresent1=Slot<Present1>(s1.Get(),22);
     DetourTransactionBegin();DetourUpdateThread(GetCurrentThread());DetourAttach(reinterpret_cast<void**>(&gPresent),HookPresent);DetourAttach(reinterpret_cast<void**>(&gResizeBuffers),HookResize);if(gPresent1)DetourAttach(reinterpret_cast<void**>(&gPresent1),HookPresent1);DetourTransactionCommit();
 }
@@ -434,6 +591,15 @@ bool Install(const std::atomic<uint32_t>* actual,const std::atomic<uint32_t>* ap
     gCreateFactory=reinterpret_cast<CreateFactory>(GetProcAddress(dxgi,"CreateDXGIFactory"));gCreateFactory1=reinterpret_cast<CreateFactory>(GetProcAddress(dxgi,"CreateDXGIFactory1"));gCreateFactory2=reinterpret_cast<CreateFactory2>(GetProcAddress(dxgi,"CreateDXGIFactory2"));
     DetourTransactionBegin();DetourUpdateThread(GetCurrentThread());if(gCreateFactory)DetourAttach(reinterpret_cast<void**>(&gCreateFactory),HookFactory);if(gCreateFactory1)DetourAttach(reinterpret_cast<void**>(&gCreateFactory1),HookFactory1);if(gCreateFactory2)DetourAttach(reinterpret_cast<void**>(&gCreateFactory2),HookFactory2);return DetourTransactionCommit()==NO_ERROR;
 }
+bool GetPacing(PacingStats& stats)
+{
+    if(!gPacing.valid.load() || GetTickCount64()-gPacing.tick.load()>2000) return false;
+    stats.averageUs=gPacing.averageUs.load(); stats.p99Us=gPacing.p99Us.load(); stats.jitterUs=gPacing.jitterUs.load();
+    return true;
+}
+void SetLog(LogFn log){gLog=log;}
+void SetExtraLines(ExtraLinesFn provider){gExtraLines.store(provider,std::memory_order_release);}
+uint64_t LastDrawTick(){return gLastDrawTick.load(std::memory_order_acquire);}
 void SetVisible(bool visible){gVisible.store(visible,std::memory_order_release);}
 bool IsVisible(){return gVisible.load(std::memory_order_acquire);}
 void SetPosition(Position pos){gPosition.store(static_cast<uint32_t>(pos),std::memory_order_release);}

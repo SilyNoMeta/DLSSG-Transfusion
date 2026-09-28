@@ -11,6 +11,14 @@
 #include "nvidia_mfg_manifest.generated.h"
 #include "pacing_policy.h"
 #include "multiplier_overlay.h"
+#include "gpu_arch.h"
+#include "hud_assist.h"
+#include "adaptive_policy.h"
+#include "addon_api.h"
+#include "hotkey_binding.h"
+#include "gpu_monitor.h"
+#include "dlss_sr.h"
+#include "unreal_screen_percentage.h"
 
 #include <Windows.h>
 #include <TlHelp32.h>
@@ -30,9 +38,11 @@
 #include <cstring>
 #include <cwchar>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <share.h>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -132,6 +142,8 @@ std::mutex gLastOptionsMutex;
 std::recursive_mutex gModuleMutex;
 std::mutex gUiTagMutex;
 std::wstring gConfigPath;
+// Set once gConfigPath is final; the ReShade add-on may read it from any thread.
+std::atomic<bool> gConfigPathReady{false};
 std::wstring gStatusPath;
 std::wstring gExecutableDirectory;
 
@@ -272,13 +284,92 @@ std::atomic<bool> gConfigForceOta{false};
 std::atomic<bool> gConfigPatchFlipMetering{false};
 std::atomic<bool> gConfigBlackwellTransfusion{true};
 std::atomic<bool> gConfigQualityFix{true};
+std::atomic<bool> gConfigQualityPolicyExplainedWarp{true};
+// HUD-less capture and UI layer synthesis (Preset B for games that do not tag them).
+std::atomic<bool> gConfigUiAssist{true};
+// Exact optimized kernels (bit-identical output), applied when the provider matches.
+std::atomic<bool> gConfigOptimizedKernels{true};
 std::atomic<bool> gConfigDisableMenuDetection{false};
 std::atomic<bool> gConfigDisableMvDilation{false};
 std::atomic<bool> gConfigForceUiRecomposition{false};
+// Turn UI recomposition on when the game tags matching HUD-less and UI
+// buffers without asking for it (true, default). False follows the game.
+std::atomic<bool> gConfigAutoUiRecomposition{true};
 std::atomic<bool> gIsEndfield{false};
+// DOOM: The Dark Ages tags HUD-less and UI (color and alpha) buffers but does
+// not ask for UI recomposition; forcing it distorts every generated frame in
+// motion (tested on an RTX 4090). Automatic UIR follows the game there.
+std::atomic<bool> gIsDoomTheDarkAges{false};
 std::atomic<bool> gConfigLogPerformance{false};
 std::atomic<bool> gConfigLogMotionTracing{false};
 std::atomic<bool> gConfigDisableKeybinds{false};
+// mode="game": the game (or NVIDIA Profile Inspector) chooses the multiplier.
+std::atomic<bool> gConfigGameMode{true};  // default: the game decides
+// Extra lines of the in-game overlay.
+std::atomic<bool> gConfigOverlayShowUir{false};
+std::atomic<bool> gConfigOverlayShowHudless{false};
+std::atomic<bool> gConfigOverlayShowUiAlpha{false};
+std::atomic<bool> gConfigOverlayShowVersions{false};
+std::atomic<bool> gConfigOverlayShowFramePacing{false};
+std::atomic<bool> gConfigOverlayShowGpu{false};
+std::atomic<bool> gConfigOverlayShowVram{false};
+std::atomic<bool> gConfigOverlayShowDebug{false};
+// DLSS Super Resolution render-scale override (dlss_sr.h).
+struct DlssScalePreset
+{
+    const char* name;
+    unsigned scale;  // percent * 1000, 0 = the game decides
+};
+constexpr DlssScalePreset kDlssScalePresets[] = {
+    {"game", 0}, {"dlaa", 100000}, {"quality", 66667}, {"balanced", 58824},
+    {"performance", 50000}, {"ultra-performance", 33333}, {"custom", 0},
+};
+constexpr uint32_t kDlssCustomPreset = 6;
+std::atomic<uint32_t> gConfigDlssRenderScale{0};   // index into kDlssScalePresets
+std::atomic<uint32_t> gConfigDlssCustomScale{67};  // percent, 50..100
+
+unsigned ConfiguredDlssScale()
+{
+    const uint32_t preset = gConfigDlssRenderScale.load(std::memory_order_relaxed);
+    if (preset == kDlssCustomPreset)
+        return std::clamp<uint32_t>(gConfigDlssCustomScale.load(std::memory_order_relaxed), 50, 100) * 1000u;
+    return preset < std::size(kDlssScalePresets) ? kDlssScalePresets[preset].scale : 0;
+}
+
+// True when DLSS-G should follow the game's own mode and multiplier: either the
+// explicit "game" mode or the legacy disableKeybinds=true behavior.
+bool GameControlsMultiplier()
+{
+    return gConfigGameMode.load(std::memory_order_relaxed)
+        || gConfigDisableKeybinds.load(std::memory_order_relaxed);
+}
+
+// Keyboard shortcuts from DLSSG-Transfusion.json ("hotkey..." keys).
+std::mutex gHotkeyMutex;
+hotkey_binding::Binding gHotkeyBindings[hotkey_binding::kActionCount];
+std::string gHotkeyText[hotkey_binding::kActionCount];
+// Set by the ReShade add-on while it records a shortcut.
+std::atomic<bool> gHotkeyCaptureActive{false};
+
+bool InitializeDefaultHotkeys()
+{
+    for (uint32_t action = 0; action < hotkey_binding::kActionCount; ++action)
+    {
+        gHotkeyText[action] = hotkey_binding::Info(action).defaults;
+        hotkey_binding::Parse(gHotkeyText[action], gHotkeyBindings[action]);
+    }
+    return true;
+}
+const bool gDefaultHotkeysReady = InitializeDefaultHotkeys();
+
+const wchar_t* ControlModeName(const ControlConfig& control)
+{
+    if (gConfigGameMode.load(std::memory_order_relaxed))
+        return L"game";
+    return control.dynamic ? L"dynamic" : L"fixed";
+}
+// Applied at process attach only: provider patches are chosen at load time.
+std::atomic<gpu_arch::Family> gConfigGpuArchitecture{gpu_arch::Family::Unknown};
 
 std::wstring gPerfCsvPath;
 FILE* gPerfCsv = nullptr;
@@ -407,6 +498,36 @@ void RecordPerfSample(uint32_t currentMultiplier)
     }
 }
 
+// dynamicTargetFrameRate=0 follows the display: the refresh rate of the monitor
+// showing the game window (primary monitor until the game is in front), or
+// 120 FPS if it cannot be read. Cached briefly: it is used on the frame path.
+uint32_t DisplayRefreshTargetFps()
+{
+    static std::atomic<uint32_t> sCached{0};
+    static std::atomic<uint64_t> sCachedTick{0};
+    const uint64_t now = GetTickCount64();
+    const uint32_t cached = sCached.load(std::memory_order_relaxed);
+    if (cached != 0 && now - sCachedTick.load(std::memory_order_relaxed) < 2000)
+        return cached;
+
+    const wchar_t* device = nullptr;
+    MONITORINFOEXW monitor{};
+    monitor.cbSize = sizeof(monitor);
+    HWND window = GetForegroundWindow();
+    DWORD pid = 0;
+    if (window && GetWindowThreadProcessId(window, &pid) && pid == GetCurrentProcessId()
+        && GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
+        device = monitor.szDevice;
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    uint32_t refresh = 120;
+    if (EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 30)
+        refresh = mode.dmDisplayFrequency;
+    sCached.store(refresh, std::memory_order_relaxed);
+    sCachedTick.store(now, std::memory_order_relaxed);
+    return refresh;
+}
+
 uint8_t RequestedMaximumGeneratedFrames(const ControlConfig& control)
 {
     return control.dynamic && !control.dynamicExperimental56
@@ -446,6 +567,11 @@ bool SetWrapperMaximum(ModuleRecord& record, uint8_t maximum)
     return true;
 }
 
+// Generated-frame ceiling of Streamline's live DLSS-G context. Dynamic MFG
+// without dynamicExperimental56 stays at 4x even when the smooth pacer hook is
+// not installed and Streamline's own calculator picks the multiplier.
+std::atomic<uint32_t> gLiveContextMaximumFrames{kExperimentalMaximumGeneratedFrames};
+
 void SynchronizeStreamlineLiveContext()
 {
     auto* ppContext = gStreamlineDlssgContextPtr.load(std::memory_order_relaxed);
@@ -455,7 +581,8 @@ void SynchronizeStreamlineLiveContext()
         uint8_t* ctx = *ppContext;
         if (ctx)
         {
-            *reinterpret_cast<uint32_t*>(ctx + 0x460c) = 5; // ensure max generated frames is 5 (6x)
+            // max generated frames: 5 (6x), or 3 (4x) for Dynamic without 5x/6x
+            *reinterpret_cast<uint32_t*>(ctx + 0x460c) = gLiveContextMaximumFrames.load(std::memory_order_relaxed);
             *reinterpret_cast<uint8_t*>(ctx + 0x4610) = 1;  // ensure dynamic MFG is supported
         }
     }
@@ -464,9 +591,11 @@ void SynchronizeStreamlineLiveContext()
     }
 }
 
-void ApplyWrapperMaximum(const ControlConfig& /*control*/)
+void ApplyWrapperMaximum(const ControlConfig& control)
 {
+    // The wrapper keeps the 6x capability so fixed 5x/6x never needs a rebuild.
     const uint8_t maximum = kExperimentalMaximumGeneratedFrames;
+    gLiveContextMaximumFrames.store(RequestedMaximumGeneratedFrames(control), std::memory_order_relaxed);
     std::lock_guard lock(gModuleMutex);
     for (auto& record : gModuleRecords)
     {
@@ -836,7 +965,10 @@ void InitLogging(HINSTANCE instance, const std::wstring& exeDir)
     gLogReady.store(gLog != nullptr, std::memory_order_release);
 
     Log(L"============================================================");
-    Log(L"DLSSG-Transfusion (Universal Blackwell Transfusion & Multi-Game Edition)");
+#ifndef TRANSFUSION_VERSION
+#define TRANSFUSION_VERSION "dev"
+#endif
+    Log(L"DLSSG-Transfusion v%hs for RTX 20, 30 and 40", TRANSFUSION_VERSION);
     Log(L"Build: %hs (%hs %hs)", scatter_experiment::kName, __DATE__, __TIME__);
     const std::wstring exceptionLogPath = JoinPath(ParentPath(logPath), L"DLSSG-Transfusion.crash.log");
     const bool exceptionObserver = crash_diagnostics::Initialize(exceptionLogPath.c_str());
@@ -870,6 +1002,11 @@ void InitLogging(HINSTANCE instance, const std::wstring& exeDir)
     {
         gIsEndfield.store(true, std::memory_order_relaxed);
         Log(L"Game Identity Match: Arknights: Endfield (UIR pipeline forced from frame 0)");
+    }
+    if (key.find("doomthedarkages") != std::string::npos)
+    {
+        gIsDoomTheDarkAges.store(true, std::memory_order_relaxed);
+        Log(L"Game Identity Match: DOOM: The Dark Ages (automatic UIR follows the game)");
     }
 
     Tier tier = LookupManifestTier(key);
@@ -976,6 +1113,16 @@ bool FindJsonValue(const std::string& content, const char* name, size_t& value)
     return value != std::string::npos;
 }
 
+bool TryParseGpuArchitecture(const std::string& content, gpu_arch::Family& family)
+{
+    size_t offset = 0;
+    if (!FindJsonValue(content, "gpuArchitecture", offset) || content[offset] != '"')
+        return false;
+    const size_t end = content.find('"', offset + 1);
+    return end != std::string::npos
+        && gpu_arch::TryParse(content.data() + offset + 1, end - offset - 1, family);
+}
+
 bool TryParseUnsigned(const std::string& content, const char* name,
     uint32_t minimum, uint32_t maximum, uint32_t& value)
 {
@@ -1030,45 +1177,148 @@ bool TryParsePosition(const std::string& content, const char* name, multiplier_o
     return false;
 }
 
+// Layout version of DLSSG-Transfusion.json. Older files (TonyJoaca's flat
+// layout, our previous ones) are still read, then rewritten in this layout.
+constexpr uint32_t kConfigVersion = 3;
+
+// Writes DLSSG-Transfusion.json grouped like the ReShade panel, with a //
+// comment after each setting. The parser finds keys anywhere, so sections are
+// free; comments must never contain double quotes.
+std::string BuildControlJson(const ControlConfig& control)
+{
+    struct Entry
+    {
+        std::string key, value, help;
+    };
+    struct Section
+    {
+        const char* name;
+        std::vector<Entry> entries;
+    };
+    const auto boolean = [](bool value) { return std::string(value ? "true" : "false"); };
+    const auto text = [](const char* value) { return std::string("\"") + value + "\""; };
+    const auto relaxed = std::memory_order_relaxed;
+    const char* mode = gConfigGameMode.load(relaxed) ? "game" : (control.dynamic ? "dynamic" : "fixed");
+
+    std::vector<Section> sections = {
+        {"general", {
+            {"gpuArchitecture", text(gpu_arch::ConfigName(gConfigGpuArchitecture.load(relaxed))),
+                "auto, ada (RTX 40), ampere (RTX 30) or turing (RTX 20). Leave on auto unless detection fails. Restart the game to apply."},
+        }},
+        {"frameGeneration", {
+            {"mode", text(mode),
+                "fixed (the multiplier below), dynamic (DLSS-G picks the multiplier to reach the target FPS) or game (the game or NVIDIA Profile Inspector decides)."},
+            {"multiplier", std::to_string(control.multiplier), "Fixed mode multiplier: 2 to 6. 5 and 6 are experimental."},
+            {"dynamicTargetFrameRate", std::to_string(control.dynamicTargetFrameRate),
+                "Dynamic mode target FPS. 0 follows the refresh rate of the monitor showing the game."},
+            {"dynamicExperimental56", boolean(control.dynamicExperimental56),
+                "Let Dynamic mode go up to 5x and 6x (needs plenty of VRAM). Off: Dynamic stays at 4x or less."},
+            {"disableKeybinds", boolean(gConfigDisableKeybinds.load(relaxed)),
+                "Turn off every keyboard shortcut and let the game or Profile Inspector control the multiplier."},
+        }},
+        {"overlay", {
+            {"showOverlay", boolean(multiplier_overlay::IsVisible()), "Show the in-game multiplier and FPS overlay."},
+            {"overlayPosition", text(multiplier_overlay::PositionToString(multiplier_overlay::GetPosition())),
+                "top-left, top-right, bottom-left or bottom-right."},
+            {"overlayShowUiRecomposition", boolean(gConfigOverlayShowUir.load(relaxed)),
+                "Extra line: whether DLSS-G UI recomposition (UIR) is on."},
+            {"overlayShowHudless", boolean(gConfigOverlayShowHudless.load(relaxed)),
+                "Extra line: where the HUD-less scene comes from (game, UI assist capture or none)."},
+            {"overlayShowUiAlpha", boolean(gConfigOverlayShowUiAlpha.load(relaxed)),
+                "Extra line: where the UI alpha comes from (game, UI assist injection or none)."},
+            {"overlayShowVersions", boolean(gConfigOverlayShowVersions.load(relaxed)),
+                "Extra line: DLSS (SR), DLSS-G (FG) and Streamline (SL) versions loaded by the game."},
+            {"overlayShowFramePacing", boolean(gConfigOverlayShowFramePacing.load(relaxed)),
+                "Extra line: displayed frame time (average, 99th percentile, jitter)."},
+            {"overlayShowGpu", boolean(gConfigOverlayShowGpu.load(relaxed)),
+                "Extra line: GPU load, temperature, power and clocks (NVML)."},
+            {"overlayShowVram", boolean(gConfigOverlayShowVram.load(relaxed)),
+                "Extra line: VRAM used / total on the GPU (all processes)."},
+            {"overlayShowDebug", boolean(gConfigOverlayShowDebug.load(relaxed)),
+                "Extra line: mode, generated-frame ceiling, Dynamic pacer hook, last Streamline result, patch route."},
+        }},
+        {"imageQuality", {
+            {"blackwellTransfusion", boolean(gConfigBlackwellTransfusion.load(relaxed)),
+                "Use the RTX 50 (sm_120) frame-generation kernels on this GPU. Restart the game to apply."},
+            {"qualityValidWarp", boolean(gConfigQualityFix.load(relaxed)),
+                "Anti-tearing and anti-ghosting protection (candidate agreement firewall, thin geometry). Restart the game to apply."},
+            {"qualityPolicy", text(gConfigQualityPolicyExplainedWarp.load(relaxed) ? "explained-warp" : "transfusion"),
+                "Protection tuning: explained-warp (default) or transfusion. Restart the game to apply."},
+            {"optimizedKernels", boolean(gConfigOptimizedKernels.load(relaxed)),
+                "Faster, bit-exact frame-generation kernels. Restart the game to apply."},
+        }},
+        {"dlssSuperResolution", {
+            {"dlssRenderScale", text(kDlssScalePresets[std::min<uint32_t>(gConfigDlssRenderScale.load(relaxed), kDlssCustomPreset)].name),
+                "Force the DLSS render resolution: game, dlaa, quality, balanced, performance, ultra-performance or custom. The game must use DLSS already."},
+            {"dlssCustomScale", std::to_string(gConfigDlssCustomScale.load(relaxed)),
+                "Render scale in percent (50 to 100) when dlssRenderScale is custom."},
+        }},
+        {"hudUi", {
+            {"autoUiRecomposition", boolean(gConfigAutoUiRecomposition.load(relaxed)),
+                "Turn UI recomposition on when the game provides HUD-less and UI buffers without asking for it. False follows the game."},
+            {"forceUiRecomposition", boolean(gConfigForceUiRecomposition.load(relaxed)),
+                "Ask DLSS-G to recompose the HUD separately even when the game does not request it."},
+            {"uiAssist", boolean(gConfigUiAssist.load(relaxed)),
+                "D3D12: capture the HUD-less scene and build the UI layer when the game does not tag them."},
+        }},
+        {"compatibility", {
+            {"disableMenuDetection", boolean(gConfigDisableMenuDetection.load(relaxed)),
+                "Keep frame generation running in menus and loading screens. Leave false: idling at 1x there avoids device-hang crashes."},
+            {"forceOTA", boolean(gConfigForceOta.load(relaxed)),
+                "Load the Frame Generation models downloaded by the NVIDIA App. Restart the game to apply."},
+            {"patchFlipMetering", boolean(gConfigPatchFlipMetering.load(relaxed)),
+                "OptiScaler flip metering bypass, only for setups that need it. Restart the game to apply."},
+            {"disableMvDilation", boolean(gConfigDisableMvDilation.load(relaxed)),
+                "Legacy experiment: declare the motion vectors as already dilated. Leave false."},
+        }},
+        {"diagnostics", {
+            {"logPerformance", boolean(gConfigLogPerformance.load(relaxed)),
+                "Write FPS and frame times to DLSSG-Transfusion_perf.csv."},
+            {"logMotionTracing", boolean(gConfigLogMotionTracing.load(relaxed)),
+                "Very verbose motion-vector diagnostics, for debugging only."},
+        }},
+    };
+    {
+        Section shortcuts{"keyboardShortcuts", {}};
+        std::lock_guard lock(gHotkeyMutex);
+        for (uint32_t action = 0; action < hotkey_binding::kActionCount; ++action)
+            shortcuts.entries.push_back({hotkey_binding::Info(action).jsonKey, text(gHotkeyText[action].c_str()),
+                action == 0 ? "Combinations such as Ctrl+Alt+4 or Ctrl+Shift+F5; several separated by commas; empty disables the action." : ""});
+        sections.push_back(std::move(shortcuts));
+    }
+
+    // "key": value, padded so the comments line up.
+    const auto line = [](std::string text, const std::string& comment)
+    {
+        if (comment.empty())
+            return text + "\n";
+        if (text.size() < 44)
+            text.append(44 - text.size(), ' ');
+        return text + " // " + comment + "\n";
+    };
+    std::string json = "{\n";
+    json += line("  \"configVersion\": " + std::to_string(kConfigVersion) + ",",
+        "Settings apply live unless the comment says to restart the game. Also editable with the ReShade add-on.");
+    for (size_t s = 0; s < sections.size(); ++s)
+    {
+        const Section& section = sections[s];
+        json += "  \"" + std::string(section.name) + "\": {\n";
+        for (size_t i = 0; i < section.entries.size(); ++i)
+        {
+            const Entry& entry = section.entries[i];
+            const bool last = i + 1 == section.entries.size();
+            json += line("    \"" + entry.key + "\": " + entry.value + (last ? "" : ","), entry.help);
+        }
+        json += s + 1 == sections.size() ? "  }\n" : "  },\n";
+    }
+    json += "}\n";
+    return json;
+}
+
 bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
 {
-    char json[4096]{};
-    const int len = sprintf_s(json,
-        "{\n"
-        "  \"multiplier\": %u,               // Target multiplier: 2 to 6 (Fixed mode)\n"
-        "  \"mode\": \"%s\",                 // \"fixed\" (manual multiplier) or \"dynamic\" (auto-adjusts to target FPS)\n"
-        "  \"disableKeybinds\": %s,        // Disable in-game hotkeys; multipliers solely controlled by game or Profile Inspector\n"
-        "  \"dynamicTargetFrameRate\": %u,   // Target FPS for dynamic mode (0 = follow display refresh rate)\n"
-        "  \"dynamicExperimental56\": %s,  // Allow 5x and 6x in dynamic mode (requires high VRAM)\n"
-        "  \"forceOTA\": %s,               // Force loading of downloaded Over-The-Air DLSS-G neural models\n"
-        "  \"showOverlay\": %s,            // Show in-game multiplier and FPS overlay (toggle: Ctrl+Alt+O)\n"
-        "  \"overlayPosition\": \"%s\",      // Overlay screen position: \"top-left\", \"top-right\", \"bottom-left\", \"bottom-right\" (cycle: Ctrl+Alt+P)\n"
-        "  \"patchFlipMetering\": %s,      // OptiScaler Flip Metering bypass (default: false)\n"
-        "  \"blackwellTransfusion\": %s,    // Blackwell sm_120 kernel cadence scatter backported to Ada sm_89\n"
-        "  \"qualityValidWarp\": %s,        // Candidate Agreement Firewall & thin-geometry protection (anti-tear/anti-ghost)\n"
-        "  \"disableMenuDetection\": %s,   // Disable menu throttling (false = safe for loading screens)\n"
-        "  \"disableMvDilation\": %s,      // Experimental: disable motion vector dilation\n"
-        "  \"forceUiRecomposition\": %s,   // Force native UI Recomposition buffer engagement (UIR)\n"
-        "  \"logPerformance\": %s,         // Rolling FPS/frametime telemetry to DLSSG-Transfusion_perf.csv\n"
-        "  \"logMotionTracing\": %s        // High-frequency motion tracing diagnostics for deep debugging\n"
-        "}\n",
-        control.multiplier,
-        control.dynamic ? "dynamic" : "fixed",
-        gConfigDisableKeybinds.load(std::memory_order_relaxed) ? "true" : "false",
-        control.dynamicTargetFrameRate,
-        control.dynamicExperimental56 ? "true" : "false",
-        gConfigForceOta.load(std::memory_order_relaxed) ? "true" : "false",
-        multiplier_overlay::IsVisible() ? "true" : "false",
-        multiplier_overlay::PositionToString(multiplier_overlay::GetPosition()),
-        gConfigPatchFlipMetering.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigBlackwellTransfusion.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigQualityFix.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigDisableMenuDetection.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigDisableMvDilation.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigForceUiRecomposition.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigLogPerformance.load(std::memory_order_relaxed) ? "true" : "false",
-        gConfigLogMotionTracing.load(std::memory_order_relaxed) ? "true" : "false");
-    if (len <= 0) return false;
+    const std::string json = BuildControlJson(control);
+    const int len = static_cast<int>(json.size());
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE)
@@ -1077,7 +1327,7 @@ bool WriteControlFile(const std::wstring& path, const ControlConfig& control)
         return false;
     }
     DWORD written = 0;
-    const BOOL res = WriteFile(file, json, static_cast<DWORD>(len), &written, nullptr);
+    const BOOL res = WriteFile(file, json.data(), static_cast<DWORD>(len), &written, nullptr);
     CloseHandle(file);
     if (res && written == static_cast<DWORD>(len))
     {
@@ -1110,6 +1360,7 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
     const bool hasMode = FindJsonValue(content, "mode", modeOffset);
     if (hasMode)
     {
+        bool gameMode = false;
         if (content.compare(modeOffset, 9, "\"dynamic\"") == 0
             || _strnicmp(&content[modeOffset], "\"dynamic\"", 9) == 0)
         {
@@ -1120,8 +1371,14 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
         {
             parsed.dynamic = false;
         }
+        else if (_strnicmp(&content[modeOffset], "\"game\"", 6) == 0)
+        {
+            parsed.dynamic = false;
+            gameMode = true;
+        }
         else
             return false;
+        gConfigGameMode.store(gameMode, std::memory_order_relaxed);
     }
     else if (missingKeys)
     {
@@ -1145,10 +1402,6 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
     if (!hasMode && hasTarget && parsed.dynamicTargetFrameRate > 0)
     {
         parsed.dynamic = true;
-    }
-    if (parsed.dynamic && parsed.dynamicTargetFrameRate == 0)
-    {
-        parsed.dynamicTargetFrameRate = 120;
     }
 
     size_t experimentalOffset = 0;
@@ -1205,6 +1458,18 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
     }
     else if (missingKeys) missingKeys->push_back("qualityValidWarp");
 
+    size_t qualityPolicyOffset = 0;
+    const bool explainedWarp = FindJsonValue(content, "qualityPolicy", qualityPolicyOffset)
+        && content.compare(qualityPolicyOffset, 16, "\"explained-warp\"") == 0;
+    const bool transfusion = qualityPolicyOffset && !explainedWarp
+        && content.compare(qualityPolicyOffset, 13, "\"transfusion\"") == 0;
+    if (explainedWarp || transfusion)
+    {
+        gConfigQualityPolicyExplainedWarp.store(explainedWarp, std::memory_order_relaxed);
+        midpoint_fix::SetQualityPolicyExplainedWarp(explainedWarp);
+    }
+    else if (missingKeys) missingKeys->push_back("qualityPolicy");
+
     size_t menuDetectionOffset = 0;
     bool disableMenuDetection = gConfigDisableMenuDetection.load(std::memory_order_relaxed);
     const bool hasMenuDetection = FindJsonValue(content, "disableMenuDetection", menuDetectionOffset)
@@ -1230,6 +1495,32 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
     if (hasForceUir) gConfigForceUiRecomposition.store(forceUiRecomposition, std::memory_order_relaxed);
     else if (missingKeys) missingKeys->push_back("forceUiRecomposition");
 
+    size_t autoUirOffset = 0;
+    bool autoUiRecomposition = gConfigAutoUiRecomposition.load(std::memory_order_relaxed);
+    if (FindJsonValue(content, "autoUiRecomposition", autoUirOffset)
+        && TryParseBoolean(content, "autoUiRecomposition", autoUiRecomposition))
+    {
+        if (gConfigAutoUiRecomposition.exchange(autoUiRecomposition, std::memory_order_relaxed) != autoUiRecomposition
+            && gControlReady.load(std::memory_order_acquire))
+            gDesiredRevision.fetch_add(1, std::memory_order_release); // resubmit with the new choice
+    }
+    else if (missingKeys) missingKeys->push_back("autoUiRecomposition");
+
+    size_t uiAssistOffset = 0;
+    bool uiAssist = gConfigUiAssist.load(std::memory_order_relaxed);
+    if (FindJsonValue(content, "uiAssist", uiAssistOffset) && TryParseBoolean(content, "uiAssist", uiAssist))
+        gConfigUiAssist.store(uiAssist, std::memory_order_relaxed);
+    else if (missingKeys) missingKeys->push_back("uiAssist");
+
+    size_t optimizedOffset = 0;
+    bool optimizedKernels = gConfigOptimizedKernels.load(std::memory_order_relaxed);
+    if (FindJsonValue(content, "optimizedKernels", optimizedOffset) && TryParseBoolean(content, "optimizedKernels", optimizedKernels))
+    {
+        gConfigOptimizedKernels.store(optimizedKernels, std::memory_order_relaxed);
+        midpoint_fix::SetOptimizedKernels(optimizedKernels);
+    }
+    else if (missingKeys) missingKeys->push_back("optimizedKernels");
+
     size_t perfOffset = 0;
     bool logPerf = gConfigLogPerformance.load(std::memory_order_relaxed);
     const bool hasPerf = FindJsonValue(content, "logPerformance", perfOffset)
@@ -1244,6 +1535,78 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
     if (hasMotionTracing) gConfigLogMotionTracing.store(logMotionTracing, std::memory_order_relaxed);
     else if (missingKeys) missingKeys->push_back("logMotionTracing");
 
+    gpu_arch::Family gpuArchitecture = gConfigGpuArchitecture.load(std::memory_order_relaxed);
+    if (TryParseGpuArchitecture(content, gpuArchitecture))
+        gConfigGpuArchitecture.store(gpuArchitecture, std::memory_order_relaxed);
+    else if (missingKeys) missingKeys->push_back("gpuArchitecture");
+
+    const std::pair<const char*, std::atomic<bool>*> overlayLines[] = {
+        {"overlayShowUiRecomposition", &gConfigOverlayShowUir},
+        {"overlayShowHudless", &gConfigOverlayShowHudless},
+        {"overlayShowUiAlpha", &gConfigOverlayShowUiAlpha},
+        {"overlayShowVersions", &gConfigOverlayShowVersions},
+        {"overlayShowFramePacing", &gConfigOverlayShowFramePacing},
+        {"overlayShowGpu", &gConfigOverlayShowGpu},
+        {"overlayShowVram", &gConfigOverlayShowVram},
+        {"overlayShowDebug", &gConfigOverlayShowDebug},
+    };
+    for (const auto& [name, flag] : overlayLines)
+    {
+        size_t offset = 0;
+        bool value = flag->load(std::memory_order_relaxed);
+        if (FindJsonValue(content, name, offset) && TryParseBoolean(content, name, value))
+            flag->store(value, std::memory_order_relaxed);
+        else if (missingKeys) missingKeys->push_back(name);
+    }
+
+    {
+        size_t offset = 0;
+        bool found = false;
+        if (FindJsonValue(content, "dlssRenderScale", offset) && content[offset] == '"')
+        {
+            for (uint32_t preset = 0; preset < std::size(kDlssScalePresets); ++preset)
+            {
+                const size_t length = std::strlen(kDlssScalePresets[preset].name);
+                if (_strnicmp(content.c_str() + offset + 1, kDlssScalePresets[preset].name, length) == 0
+                    && content[offset + 1 + length] == '"')
+                {
+                    gConfigDlssRenderScale.store(preset, std::memory_order_relaxed);
+                    found = true;
+                }
+            }
+        }
+        if (!found && missingKeys) missingKeys->push_back("dlssRenderScale");
+        uint32_t custom = gConfigDlssCustomScale.load(std::memory_order_relaxed);
+        if (FindJsonValue(content, "dlssCustomScale", offset) && TryParseUnsigned(content, "dlssCustomScale", 50, 100, custom))
+            gConfigDlssCustomScale.store(custom, std::memory_order_relaxed);
+        else if (missingKeys) missingKeys->push_back("dlssCustomScale");
+        dlss_sr::SetScale(ConfiguredDlssScale());
+    }
+
+    for (uint32_t action = 0; action < hotkey_binding::kActionCount; ++action)
+    {
+        const char* name = hotkey_binding::Info(action).jsonKey;
+        size_t offset = 0;
+        if (!FindJsonValue(content, name, offset) || content[offset] != '"')
+        {
+            if (missingKeys) missingKeys->push_back(name);
+            continue;
+        }
+        const size_t end = content.find('"', offset + 1);
+        if (end == std::string::npos)
+            continue;
+        const std::string text = content.substr(offset + 1, end - offset - 1);
+        hotkey_binding::Binding binding;
+        if (!hotkey_binding::Parse(text, binding))
+        {
+            Log(L"[CONFIG] Ignored invalid shortcut %hs=\"%hs\"", name, text.c_str());
+            continue;
+        }
+        std::lock_guard lock(gHotkeyMutex);
+        gHotkeyBindings[action] = binding;
+        gHotkeyText[action] = text;
+    }
+
     control = parsed;
     return true;
 }
@@ -1256,7 +1619,7 @@ bool ReadControlFile(const std::wstring& path, ControlConfig& control)
     if (file == INVALID_HANDLE_VALUE)
         return false;
 
-    std::array<char, 8192> buffer{};
+    std::array<char, 16384> buffer{};
     DWORD bytesRead = 0;
     const BOOL read = ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &bytesRead, nullptr);
     CloseHandle(file);
@@ -1266,8 +1629,11 @@ bool ReadControlFile(const std::wstring& path, ControlConfig& control)
 
     std::vector<std::string> missingKeys;
     const bool parsed = TryParseControl(buffer.data(), bytesRead, control, &missingKeys);
-    const bool hasComments = std::string_view(buffer.data(), bytesRead).find("//") != std::string_view::npos;
-    if (parsed && (!missingKeys.empty() || !hasComments))
+    // Rewrite files from older layouts (// comments, TonyJoaca's) or with missing keys.
+    uint32_t configVersion = 0;
+    const bool currentLayout = TryParseUnsigned(std::string(buffer.data(), bytesRead), "configVersion",
+        0, 1000, configVersion) && configVersion == kConfigVersion;
+    if (parsed && (!missingKeys.empty() || !currentLayout))
     {
         std::string missingList;
         for (size_t i = 0; i < missingKeys.size(); ++i)
@@ -1277,13 +1643,13 @@ bool ReadControlFile(const std::wstring& path, ControlConfig& control)
         }
         if (!missingKeys.empty())
         {
-            Log(L"[CONFIG] Config %s was missing %u setting(s): [%hs]; updating file with complete schema and comments",
+            Log(L"[CONFIG] Config %s was missing %u setting(s): [%hs]; rewriting it with every setting",
                 path.c_str(), static_cast<uint32_t>(missingKeys.size()), missingList.c_str());
         }
         else
         {
-            Log(L"[CONFIG] Config %s has no setting descriptions; updating file with descriptive comments",
-                path.c_str());
+            Log(L"[CONFIG] Config %s uses an older layout; rewriting it as layout %u (values kept)",
+                path.c_str(), kConfigVersion);
         }
         WriteControlFile(path, control);
     }
@@ -1391,7 +1757,7 @@ void PublishLiveBridge(const ControlConfig& control)
     wchar_t target[16]{};
     swprintf_s(target, L"%u", control.dynamicTargetFrameRate);
     SetEnvironmentVariableW(L"RTX40_MFG_ACTIVE_MULTIPLIER", multiplier);
-    SetEnvironmentVariableW(L"RTX40_MFG_ACTIVE_MODE", control.dynamic ? L"dynamic" : L"fixed");
+    SetEnvironmentVariableW(L"RTX40_MFG_ACTIVE_MODE", ControlModeName(control));
     SetEnvironmentVariableW(L"RTX40_MFG_DYNAMIC_TARGET", target);
     SetEnvironmentVariableW(L"RTX40_MFG_DYNAMIC_EXPERIMENTAL_56",
         control.dynamicExperimental56 ? L"1" : L"0");
@@ -1495,7 +1861,7 @@ bool WriteBridgeStatus(const ControlConfig& control, DWORD pid)
         gPatchedWrapperCandidates.load(std::memory_order_relaxed),
         gLoadedNgxCandidates.load(std::memory_order_relaxed),
         gPatchedNgxCandidates.load(std::memory_order_relaxed),
-        control.dynamic ? "dynamic" : "fixed", control.multiplier,
+        gConfigGameMode.load(std::memory_order_relaxed) ? "game" : (control.dynamic ? "dynamic" : "fixed"), control.multiplier,
         control.dynamicTargetFrameRate,
         control.dynamicExperimental56 ? "true" : "false",
         static_cast<uint32_t>(RequestedMaximumGeneratedFrames(control)) + 1,
@@ -1619,6 +1985,187 @@ const wchar_t* ModeName(sl::DLSSGMode mode) noexcept
     }
 }
 
+// Adaptive MFG (Vulkan). Streamline offers no native Dynamic MFG in Vulkan:
+// there the dynamic mode submits fixed multipliers chosen by
+// adaptive_policy::Controller from the source-frame cadence. The controller
+// samples each frame token in slSetConstants; a change is submitted by the
+// usual reapply path on the game's thread, never from another thread. D3D12
+// keeps NVIDIA's Dynamic MFG. See docs/VULKAN.md.
+bool VulkanFrameGenerationActive(); // after vulkan_nvx.h
+
+struct AdaptiveMfgState
+{
+    std::mutex mutex;
+    adaptive_policy::Controller controller;
+    bool started = false;        // a factor was accepted in this FG session
+    bool startRequested = false; // a first submission was requested
+    unsigned proposed = 0;       // factor for the next submission
+};
+AdaptiveMfgState gAdaptive;
+
+bool AdaptiveMfgMode(const ControlConfig& control)
+{
+    return control.dynamic && !GameControlsMultiplier() && VulkanFrameGenerationActive();
+}
+
+unsigned AdaptiveCeiling(const ControlConfig& control)
+{
+    return RequestedMaximumGeneratedFrames(control) + 1u;
+}
+
+unsigned AdaptiveTarget(const ControlConfig& control)
+{
+    return control.dynamicTargetFrameRate ? control.dynamicTargetFrameRate : DisplayRefreshTargetFps();
+}
+
+double AdaptiveSeconds()
+{
+    static const double period = [] {
+        LARGE_INTEGER frequency{};
+        return QueryPerformanceFrequency(&frequency) && frequency.QuadPart ? 1.0 / double(frequency.QuadPart) : 0.0;
+    }();
+    LARGE_INTEGER now{};
+    return QueryPerformanceCounter(&now) ? double(now.QuadPart) * period : -1.0;
+}
+
+void AdaptiveResetSession()
+{
+    std::lock_guard lock(gAdaptive.mutex);
+    gAdaptive.started = gAdaptive.startRequested = false;
+    gAdaptive.proposed = 0;
+}
+
+// The factor the next submission carries: the controller's proposal, its
+// current factor, or the game's own request for the first one.
+unsigned AdaptiveFactorToSubmit(const ControlConfig& control, const sl::DLSSGOptions& source)
+{
+    std::lock_guard lock(gAdaptive.mutex);
+    const unsigned ceiling = AdaptiveCeiling(control);
+    if (gAdaptive.proposed) return std::min(gAdaptive.proposed, ceiling);
+    if (gAdaptive.started && !gAdaptive.controller.rejected) return std::min(gAdaptive.controller.factor, ceiling);
+    return std::clamp(source.numFramesToGenerate + 1u, adaptive_policy::kMinimum, ceiling);
+}
+
+void AdaptiveRecordSubmit(const ControlConfig& control, unsigned factor, sl::Result result)
+{
+    const bool accepted = result == sl::Result::eOk || result == sl::Result::eWarnOutOfVRAM;
+    const unsigned ceiling = AdaptiveCeiling(control);
+    std::lock_guard lock(gAdaptive.mutex);
+    auto& c = gAdaptive.controller;
+    gAdaptive.proposed = 0;
+    if (!accepted)
+    {
+        // Stop until the next change of settings or FG session.
+        if (!c.rejected)
+            Log(L"[ADAPTIVE] X%u refused by Streamline (result=%d); adaptive control paused", factor,
+                static_cast<int>(result));
+        c.rejected = true;
+        return;
+    }
+    if (!gAdaptive.started || c.rejected || c.ceiling != ceiling)
+    {
+        c.Reset(factor, ceiling);
+        gAdaptive.started = true;
+        Log(L"[ADAPTIVE] Vulkan adaptive MFG at X%u (ceiling X%u, target %u FPS)", factor, ceiling,
+            AdaptiveTarget(control));
+        return;
+    }
+    const unsigned previous = c.factor;
+    const double sourceFps = c.SourceFps();
+    c.Accept(factor, AdaptiveSeconds());
+    if (c.factor != previous)
+        Log(L"[ADAPTIVE] X%u -> X%u (source %.1f FPS, target %u FPS)", previous, c.factor, sourceFps,
+            AdaptiveTarget(control));
+}
+
+// One call per game frame token, after a successful slSetConstants.
+void AdaptiveObserveFrame(uint32_t frame, bool reset)
+{
+    const ControlSnapshot snapshot = ReadControlSnapshot();
+    const bool adaptive = AdaptiveMfgMode(snapshot.control) && gGameFrameGenerationOn.load(std::memory_order_acquire);
+    bool request = false;
+    {
+        std::lock_guard lock(gAdaptive.mutex);
+        if (!adaptive)
+        {
+            gAdaptive.started = gAdaptive.startRequested = false;
+            gAdaptive.proposed = 0;
+            return;
+        }
+        if (!gAdaptive.started)
+        {
+            // Entered after the game's last options call (FG enabled first,
+            // Vulkan seen later, or the mode just selected): submit once.
+            request = !gAdaptive.startRequested;
+            gAdaptive.startRequested = true;
+        }
+        else if (!gAdaptive.proposed)
+        {
+            const unsigned next = gAdaptive.controller.Sample(frame, AdaptiveSeconds(), reset,
+                AdaptiveTarget(snapshot.control));
+            if (next != gAdaptive.controller.factor)
+            {
+                gAdaptive.proposed = next;
+                request = true;
+            }
+        }
+    }
+    if (request)
+        gDesiredRevision.fetch_add(1, std::memory_order_release);
+}
+
+// Game (source) frames per second, from unique slSetConstants frame tokens:
+// one per rendered frame whatever the renderer. The add-on's overlay (Vulkan)
+// uses it; the DXGI overlay counts its presents instead.
+std::atomic<uint32_t> gSourceFpsMilli{0};
+std::atomic<uint64_t> gSourceFpsTick{0};
+
+void ObserveSourceFrame(uint32_t frame)
+{
+    static std::mutex sMutex;
+    static uint32_t sLastFrame = 0;
+    static bool sHaveFrame = false;
+    static uint32_t sFrames = 0;
+    static LARGE_INTEGER sWindowStart{};
+    static const int64_t sFrequency = [] {
+        LARGE_INTEGER value{};
+        return QueryPerformanceFrequency(&value) ? value.QuadPart : 0;
+    }();
+    LARGE_INTEGER now{};
+    if (sFrequency <= 0 || !QueryPerformanceCounter(&now))
+        return;
+    std::lock_guard lock(sMutex);
+    if (sHaveFrame && frame == sLastFrame)
+        return;
+    sHaveFrame = true;
+    sLastFrame = frame;
+    if (!sWindowStart.QuadPart || now.QuadPart - sWindowStart.QuadPart > sFrequency * 2)
+    {
+        // First frame, or a stall (loading, pause): restart the window.
+        sWindowStart = now;
+        sFrames = 0;
+        return;
+    }
+    ++sFrames;
+    const int64_t elapsed = now.QuadPart - sWindowStart.QuadPart;
+    if (elapsed < sFrequency / 2)
+        return;
+    gSourceFpsMilli.store(static_cast<uint32_t>(std::min<int64_t>(UINT32_MAX,
+        (int64_t(sFrames) * sFrequency * 1000 + elapsed / 2) / elapsed)), std::memory_order_relaxed);
+    gSourceFpsTick.store(GetTickCount64(), std::memory_order_release);
+    sWindowStart = now;
+    sFrames = 0;
+}
+
+// Whether to turn UI recomposition on although the game did not ask for it:
+// the game tags matching HUD-less and UI buffers, the setting allows it, and
+// the game is not one where that is known to break the generated frames.
+bool AutomaticUiRecomposition(const UiInputSnapshot& uiInputs)
+{
+    return uiInputs.ready && gConfigAutoUiRecomposition.load(std::memory_order_relaxed)
+        && !gIsDoomTheDarkAges.load(std::memory_order_relaxed);
+}
+
 sl::DLSSGOptions CopyKnownOptions(const sl::DLSSGOptions& source, bool preserveNext)
 {
     sl::DLSSGOptions copy{};
@@ -1657,14 +2204,12 @@ sl::DLSSGOptions CopyKnownOptions(const sl::DLSSGOptions& source, bool preserveN
 sl::DLSSGOptions BuildAdjustedOptions(
     const sl::DLSSGOptions& source, const ControlSnapshot& snapshot,
     bool preserveNext, bool enableUiRecomposition,
-    const UiInputSnapshot* uiInputs = nullptr)
+    const UiInputSnapshot* uiInputs = nullptr, unsigned* adaptiveFactor = nullptr)
 {
     sl::DLSSGOptions adjusted = CopyKnownOptions(source, preserveNext);
-    const bool disableKeybinds = gConfigDisableKeybinds.load(std::memory_order_relaxed);
-
-    if (disableKeybinds)
+    if (GameControlsMultiplier())
     {
-        // When disableKeybinds is enabled, multipliers are solely controlled by the game or profile inspector
+        // mode="game" (or legacy disableKeybinds): multipliers are solely controlled by the game or profile inspector
         const bool isDynamic = (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic);
         if (isDynamic)
         {
@@ -1672,7 +2217,7 @@ sl::DLSSGOptions BuildAdjustedOptions(
             adjusted.mode = sl::DLSSGMode::eDynamic;
             adjusted.dynamicTargetFrameRate = source.dynamicTargetFrameRate > 0.0f
                 ? source.dynamicTargetFrameRate
-                : (snapshot.control.dynamicTargetFrameRate > 0 ? static_cast<float>(snapshot.control.dynamicTargetFrameRate) : 120.0f);
+                : static_cast<float>(snapshot.control.dynamicTargetFrameRate > 0 ? snapshot.control.dynamicTargetFrameRate : DisplayRefreshTargetFps());
             adjusted.numFramesToGenerate = source.numFramesToGenerate > 0
                 ? source.numFramesToGenerate
                 : RequestedMaximumGeneratedFrames(snapshot.control);
@@ -1689,7 +2234,17 @@ sl::DLSSGOptions BuildAdjustedOptions(
     {
         const bool isDynamic = snapshot.control.dynamic
             || (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic);
-        if (isDynamic)
+        if (isDynamic && AdaptiveMfgMode(snapshot.control))
+        {
+            // Vulkan: a fixed multiplier chosen by the adaptive controller.
+            const unsigned factor = AdaptiveFactorToSubmit(snapshot.control, source);
+            adjusted.mode = sl::DLSSGMode::eOn;
+            adjusted.numFramesToGenerate = factor - 1;
+            adjusted.structVersion = std::max<size_t>(adjusted.structVersion, sl::kStructVersion5);
+            if (adaptiveFactor)
+                *adaptiveFactor = factor;
+        }
+        else if (isDynamic)
         {
             // The injected object is a complete v5 structure even when Cyberpunk supplied
             // an older prefix, so the active wrapper can consume the dynamic target
@@ -1698,7 +2253,7 @@ sl::DLSSGOptions BuildAdjustedOptions(
             adjusted.mode = sl::DLSSGMode::eDynamic;
             float targetFps = (source.structVersion >= sl::kStructVersion5 && source.mode == sl::DLSSGMode::eDynamic && source.dynamicTargetFrameRate > 0.0f)
                 ? source.dynamicTargetFrameRate
-                : static_cast<float>(snapshot.control.dynamicTargetFrameRate > 0 ? snapshot.control.dynamicTargetFrameRate : 120);
+                : static_cast<float>(snapshot.control.dynamicTargetFrameRate > 0 ? snapshot.control.dynamicTargetFrameRate : DisplayRefreshTargetFps());
             adjusted.dynamicTargetFrameRate = targetFps;
             adjusted.numFramesToGenerate =
                 RequestedMaximumGeneratedFrames(snapshot.control);
@@ -1873,11 +2428,13 @@ void RecordAppliedControl(const ControlSnapshot& snapshot, sl::Result result,
 
     if (previous == snapshot.revision)
         return;
-    if (gConfigDisableKeybinds.load(std::memory_order_relaxed))
+    if (GameControlsMultiplier())
         Log(L"%s game/profile-driven DLSS-G: %ux (%u generated frames), result=%d (%s)",
             liveReapply ? L"Live-reapplied" : L"Applied",
             appliedMult, appliedMult > 0 ? appliedMult - 1 : 0,
             static_cast<int>(result), ResultName(result));
+    else if (snapshot.control.dynamic && AdaptiveMfgMode(snapshot.control))
+        return; // logged by AdaptiveRecordSubmit
     else if (snapshot.control.dynamic)
         Log(L"%s dynamic MFG: target=%u FPS experimental56=%d max=%ux result=%d (%s)",
             liveReapply ? L"Live-reapplied" : L"Applied",
@@ -1902,10 +2459,12 @@ sl::Result SubmitAdjustedOptions(
     const bool gameUiRecomposition = (source.structVersion >= sl::kStructVersion4
         && source.enableUserInterfaceRecomposition == sl::Boolean::eTrue)
         || gGameUiRecompositionEnabled.load(std::memory_order_relaxed);
-    const bool enableUi = gameUiRecomposition || uiInputs.ready || forceUirConfig;
-    const bool forceUiRecomposition = (uiInputs.ready || forceUirConfig) && !gameUiRecomposition;
+    const bool autoUi = AutomaticUiRecomposition(uiInputs);
+    const bool enableUi = gameUiRecomposition || autoUi || forceUirConfig;
+    const bool forceUiRecomposition = (autoUi || forceUirConfig) && !gameUiRecomposition;
+    unsigned adaptiveFactor = 0;
     const sl::DLSSGOptions adjusted = BuildAdjustedOptions(
-        source, snapshot, !liveReapply, enableUi, &uiInputs);
+        source, snapshot, !liveReapply, enableUi, &uiInputs, &adaptiveFactor);
     const bool uiRecompositionEnabled = adjusted.structVersion >= sl::kStructVersion4
         && adjusted.enableUserInterfaceRecomposition == sl::Boolean::eTrue;
 
@@ -1930,6 +2489,8 @@ sl::Result SubmitAdjustedOptions(
 
     SynchronizeStreamlineLiveContext();
     const sl::Result result = original(viewport, adjusted);
+    if (adaptiveFactor)
+        AdaptiveRecordSubmit(snapshot.control, adaptiveFactor, result);
     const uint32_t effectiveMultiplier = adjusted.numFramesToGenerate + 1;
     RecordAppliedControl(snapshot, result, liveReapply,
         uiRecompositionEnabled, forceUiRecomposition, effectiveMultiplier);
@@ -2023,11 +2584,16 @@ void ReapplyPendingControl(const sl::ViewportHandle& viewport)
         const UiInputSnapshot uiInputs = ReadUiInputSnapshot(static_cast<uint32_t>(targetViewport));
         const bool gameUi = (source.structVersion >= sl::kStructVersion4 && source.enableUserInterfaceRecomposition == sl::Boolean::eTrue)
             || gGameUiRecompositionEnabled.load(std::memory_order_relaxed);
-        sl::DLSSGOptions adjusted = BuildAdjustedOptions(source, snapshot, false, gameUi || uiInputs.ready || forceUirConfig, &uiInputs);
+        unsigned adaptiveFactor = 0;
+        const bool autoUi = AutomaticUiRecomposition(uiInputs);
+        sl::DLSSGOptions adjusted = BuildAdjustedOptions(source, snapshot, false, gameUi || autoUi || forceUirConfig,
+            &uiInputs, &adaptiveFactor);
         sl::ViewportHandle vpCopy = targetViewport;
         vpCopy.next = &adjusted;
         adjusted.next = nullptr;
         const sl::Result result = originalSetData(&vpCopy, nullptr);
+        if (adaptiveFactor)
+            AdaptiveRecordSubmit(snapshot.control, adaptiveFactor, result);
         const uint32_t effectiveMultiplier = adjusted.numFramesToGenerate + 1;
         RecordAppliedControl(snapshot, result, true, adjusted.enableUserInterfaceRecomposition == sl::Boolean::eTrue, false, effectiveMultiplier);
         if (result != sl::Result::eOk && result != sl::Result::eWarnOutOfVRAM)
@@ -2073,6 +2639,7 @@ sl::Result HookSlDLSSGSetOptions(
     SetFrameGenerationEnabled(enabled);
     if (!enabled)
     {
+        AdaptiveResetSession();
         gSetOptionsSeen.store(true, std::memory_order_release);
         const sl::Result result = original(viewport, options);
         gLastSetOptionsResult.store(static_cast<int32_t>(result), std::memory_order_relaxed);
@@ -2160,6 +2727,21 @@ sl::Result HookSlGetFeatureFunction(
     return result;
 }
 
+// Submits a tag built by hud_assist straight to Streamline (not through our
+// hook) and records it like a game UI input, so Transfusion's own UIR
+// readiness engages the HUD-less / UI layer path.
+bool SubmitUiAssistTag(uint32_t viewport, const sl::ResourceTag& tag, sl::CommandBuffer* list)
+{
+    auto* original = gOriginalSetTag.load(std::memory_order_acquire);
+    if (!original)
+        return false;
+    const sl::ViewportHandle handle{viewport};
+    if (original(handle, &tag, 1, list) != sl::Result::eOk)
+        return false;
+    CaptureUiResourceTags(handle, &tag, 1);
+    return true;
+}
+
 sl::Result HookSlSetTag(const sl::ViewportHandle& viewport,
     const sl::ResourceTag* tags, uint32_t numTags, sl::CommandBuffer* cmdBuffer)
 {
@@ -2181,6 +2763,8 @@ sl::Result HookSlSetTag(const sl::ViewportHandle& viewport,
     {
         CaptureUiResourceTags(viewport, tags, numTags);
         LogMotionResourceTags(viewport, tags, numTags, false, 0);
+        hud_assist::ObserveGameTags(static_cast<uint32_t>(viewport), tags, numTags,
+            gConfigUiAssist.load(std::memory_order_relaxed), false, cmdBuffer);
     }
     TryReapplyPendingControl(viewport);
     return result;
@@ -2204,6 +2788,9 @@ sl::Result HookSlSetTagForFrame(const sl::FrameToken& frame,
     if (result == sl::Result::eOk)
     {
         CaptureUiResourceTags(viewport, tags, numTags);
+        // Our tags go through slSetTag: frame-based games get no UI assist.
+        hud_assist::ObserveGameTags(static_cast<uint32_t>(viewport), tags, numTags,
+            gConfigUiAssist.load(std::memory_order_relaxed), true, cmdBuffer);
         LogMotionResourceTags(viewport, tags, numTags, true, static_cast<uint32_t>(frame));
     }
     TryReapplyPendingControl(viewport);
@@ -2212,6 +2799,8 @@ sl::Result HookSlSetTagForFrame(const sl::FrameToken& frame,
 
 sl::Result HookSlSetD3DDevice(void* device)
 {
+    // A tag's native handle is an ID3D12Resource only on D3D12.
+    hud_assist::g_d3d12.store(true, std::memory_order_relaxed);
     auto* original = gOriginalSetD3DDevice.load(std::memory_order_acquire);
     const uint64_t start = GetTickCount64();
     Log(L"[DBG] slSetD3DDevice ENTER: device=%p original=%p", device, original);
@@ -2257,6 +2846,7 @@ PFun_slSetVulkanInfo* gDetourSlSetVulkanInfo = nullptr;
 
 sl::Result HookSlSetVulkanInfo(const VulkanInfoPrefix& info)
 {
+    hud_assist::g_d3d12.store(false, std::memory_order_relaxed);
     auto* original = gOriginalSetVulkanInfo.load(std::memory_order_acquire);
     if (!original)
         return sl::Result::eErrorNotInitialized;
@@ -2449,7 +3039,8 @@ sl::Result HookSlSetData(const sl::BaseStructure* inputs, sl::CommandBuffer* cmd
             const UiInputSnapshot uiInputs = viewport ? ReadUiInputSnapshot(static_cast<uint32_t>(*viewport)) : UiInputSnapshot{};
             const bool gameUi = (options->structVersion >= sl::kStructVersion4 && options->enableUserInterfaceRecomposition == sl::Boolean::eTrue)
                 || gGameUiRecompositionEnabled.load(std::memory_order_relaxed);
-            sl::DLSSGOptions adjusted = BuildAdjustedOptions(*options, snapshot, false, gameUi || uiInputs.ready || forceUirConfig, &uiInputs);
+            const bool autoUi = AutomaticUiRecomposition(uiInputs);
+            sl::DLSSGOptions adjusted = BuildAdjustedOptions(*options, snapshot, false, gameUi || autoUi || forceUirConfig, &uiInputs);
 
             const sl::BaseStructure* head = inputs;
             sl::BaseStructure* prevNode = nullptr;
@@ -2512,6 +3103,11 @@ sl::Result HookSlSetConstants(
         sl::Constants adjusted = values;
         adjusted.motionVectorsDilated = sl::Boolean::eTrue;
         result = original(adjusted, frame, viewport);
+    }
+    if (result == sl::Result::eOk)
+    {
+        ObserveSourceFrame(static_cast<uint32_t>(frame));
+        AdaptiveObserveFrame(static_cast<uint32_t>(frame), values.reset == sl::Boolean::eTrue);
     }
     TryReapplyPendingControl(viewport);
     return result;
@@ -3396,17 +3992,8 @@ void HookedDynamicMfgCalculator(void* context, StreamlineDynamicMfgParams* param
     if (targetFps <= 0.0f)
     {
         const auto snapshot = ReadControlSnapshot();
-        if (snapshot.control.dynamicTargetFrameRate > 0)
-            targetFps = static_cast<float>(snapshot.control.dynamicTargetFrameRate);
-        else
-        {
-            DEVMODEW dm{};
-            dm.dmSize = sizeof(dm);
-            if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 30)
-                targetFps = static_cast<float>(dm.dmDisplayFrequency);
-            else
-                targetFps = 120.0f;
-        }
+        targetFps = static_cast<float>(snapshot.control.dynamicTargetFrameRate > 0
+            ? snapshot.control.dynamicTargetFrameRate : DisplayRefreshTargetFps());
     }
 
     const double baseFps = 1000000.0 / sSmoothedFrameTimeUs;
@@ -3654,7 +4241,7 @@ bool PatchStreamlineDynamicMfgSupported(HMODULE module, const wchar_t* path)
     return anyPatched;
 }
 
-static bool SafeScanDlssgArchSites(const uint8_t* base, const IMAGE_NT_HEADERS64* nt,
+static bool SafeScanDlssgArchSites(const uint8_t* base, const IMAGE_NT_HEADERS64* nt, uint8_t kArchNew,
     uint8_t** outSites, size_t maxSites, size_t* outFound, size_t* outAlreadyPatched)
 {
     if (!base || !nt || !outSites || !outFound || !outAlreadyPatched)
@@ -3662,7 +4249,6 @@ static bool SafeScanDlssgArchSites(const uint8_t* base, const IMAGE_NT_HEADERS64
     __try
     {
         constexpr uint8_t kArchOld = 0xB0;
-        constexpr uint8_t kArchNew = 0x90;
         const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
         for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
         {
@@ -3717,12 +4303,15 @@ bool PatchDlssgArchGates(HMODULE module, const wchar_t* path)
     if (!nt) return false;
     auto* base = reinterpret_cast<uint8_t*>(module);
 
-    constexpr uint8_t kArchNew = 0x90; // 0x190 AD10x (Ada)
+    // Blackwell-only gates (0x1b0) are lowered to the architecture actually
+    // present: 0x190 on Ada, 0x170 on Ampere, 0x160 on Turing.
+    const uint32_t target = gpu_arch::NgxArchitecture();
+    const uint8_t kArchNew = static_cast<uint8_t>(target & 0xFF);
 
     uint8_t* sites[64]{};
     size_t sitesFound = 0;
     size_t alreadyPatched = 0;
-    if (!SafeScanDlssgArchSites(base, nt, sites, _countof(sites), &sitesFound, &alreadyPatched))
+    if (!SafeScanDlssgArchSites(base, nt, kArchNew, sites, _countof(sites), &sitesFound, &alreadyPatched))
         return false;
 
     size_t written = 0;
@@ -3742,11 +4331,176 @@ bool PatchDlssgArchGates(HMODULE module, const wchar_t* path)
 
     if (written > 0)
     {
-        Log(L"DLSS-G arch gates patched in %s: %zu site(s) rewrote 0x1b0 -> 0x190 (Ada)",
-            path ? path : L"", written);
+        Log(L"DLSS-G arch gates patched in %s: %zu site(s) rewrote 0x1b0 -> 0x%x",
+            path ? path : L"", written, target);
         return true;
     }
     return alreadyPatched > 0;
+}
+
+// Below Ada the provider itself refuses to start: NVSDK_NGX_GetGPUArchitecture
+// returns Ada (400) and the three *_GetFeatureRequirements report it as the
+// minimum, so NGX answers AdapterUnsupported. The exports are found by name and
+// the unique immediate 400 in their first bytes is lowered to the real
+// architecture. A hook would not do: GetFeatureRequirements checks that its
+// caller is nvngx.dll through the return address.
+static uint32_t* SafeFindUniqueImmediate(uint8_t* function, size_t span, uint32_t value)
+{
+    __try
+    {
+        uint32_t* hit = nullptr;
+        for (size_t i = 0; i + sizeof(uint32_t) <= span; ++i)
+        {
+            uint32_t candidate = 0;
+            std::memcpy(&candidate, function + i, sizeof(candidate));
+            if (candidate != value) continue;
+            if (hit) return nullptr; // Ambiguous: never guess.
+            hit = reinterpret_cast<uint32_t*>(function + i);
+        }
+        return hit;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return nullptr;
+    }
+}
+
+bool PatchDlssgMinimumArchitecture(HMODULE module, const wchar_t* path)
+{
+    if (!module || !gpu_arch::PreAda()) return false;
+    const auto* nt = ImageHeaders(module);
+    if (!nt) return false;
+    auto* base = reinterpret_cast<uint8_t*>(module);
+    constexpr uint32_t kAda = 0x190;
+    const uint32_t target = gpu_arch::NgxArchitecture();
+    static constexpr const char* kExports[] = {
+        "NVSDK_NGX_GetGPUArchitecture",
+        "NVSDK_NGX_D3D11_GetFeatureRequirements",
+        "NVSDK_NGX_D3D12_GetFeatureRequirements",
+        "NVSDK_NGX_VULKAN_GetFeatureRequirements",
+    };
+    size_t patched = 0;
+    size_t present = 0;
+    for (const char* name : kExports)
+    {
+        auto* function = reinterpret_cast<uint8_t*>(GetProcAddress(module, name));
+        if (!function) continue;
+        ++present;
+        const size_t offset = static_cast<size_t>(function - base);
+        if (offset >= nt->OptionalHeader.SizeOfImage) continue;
+        const size_t span = std::min<size_t>(400, nt->OptionalHeader.SizeOfImage - offset);
+        if (SafeFindUniqueImmediate(function, span, target))
+        {
+            ++patched; // Already lowered by an earlier inspection.
+            continue;
+        }
+        uint32_t* immediate = SafeFindUniqueImmediate(function, span, kAda);
+        DWORD oldProtect = 0;
+        if (!immediate || !VirtualProtect(immediate, sizeof(uint32_t), PAGE_EXECUTE_READWRITE, &oldProtect))
+        {
+            Log(L"DLSS-G minimum architecture: %hs has no unique Ada immediate in %s", name, path ? path : L"");
+            continue;
+        }
+        *immediate = target;
+        DWORD ignored = 0;
+        VirtualProtect(immediate, sizeof(uint32_t), oldProtect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), immediate, sizeof(uint32_t));
+        ++patched;
+    }
+    Log(L"DLSS-G minimum architecture: %zu of %zu export(s) lowered 0x190 -> 0x%x in %s",
+        patched, present, target, path ? path : L"");
+    return present > 0 && patched == present;
+}
+
+// The provider builds its frame-generation networks from one of three variants
+// chosen by the SM version NGX reports (310.9.x):
+//
+//     call  [vtbl+0x40]      ; SM version
+//     mov   ecx, <size>
+//     cmp   eax, 0x59        ; 89
+//     jle   ada_or_older     ; == 89 -> NVIDIA sm_89 cubins, < 89 -> sm_86 cubins
+//     call  allocate         ; > 89  -> PTX modules
+//
+// A Turing GPU can run neither cubin set. Removing the jle makes every network
+// take the PTX branch, which midpoint_fix retargets and lowers to sm_75.
+static size_t SafeScanNetworkSelectors(uint8_t* base, const IMAGE_NT_HEADERS64* nt, uint8_t** sites, size_t maxSites,
+    size_t* alreadyPatched)
+{
+    static constexpr int16_t kPattern[] = {
+        0x48, 0x8B, 0x40, 0x40, 0xFF, 0x15, -1, -1, -1, -1, 0xB9, -1, -1, -1, -1,
+        0x83, 0xF8, 0x59, -2, -1, 0xE8 }; // -2 marks the jle opcode byte (0x7E, or 0x90 once patched)
+    constexpr size_t kJle = 18;
+    size_t found = 0;
+    __try
+    {
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section)
+        {
+            if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) continue;
+            if (section->VirtualAddress >= nt->OptionalHeader.SizeOfImage) continue;
+            const size_t size = std::min<size_t>(nt->OptionalHeader.SizeOfImage - section->VirtualAddress,
+                static_cast<size_t>(section->Misc.VirtualSize));
+            uint8_t* start = base + section->VirtualAddress;
+            for (size_t off = 0; off + _countof(kPattern) <= size; ++off)
+            {
+                bool match = true;
+                for (size_t k = 0; k < _countof(kPattern) && match; ++k)
+                {
+                    if (kPattern[k] == -1) continue;
+                    const uint8_t byte = start[off + k];
+                    match = kPattern[k] == -2 ? (byte == 0x7E || byte == 0x90) : byte == kPattern[k];
+                }
+                if (!match) continue;
+                uint8_t* jle = start + off + kJle;
+                if (jle[0] == 0x90 && jle[1] == 0x90) { ++*alreadyPatched; continue; }
+                if (jle[0] != 0x7E) continue;
+                if (found < maxSites) sites[found] = jle;
+                ++found;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return SIZE_MAX;
+    }
+    return found;
+}
+
+bool PatchDlssgNetworkSelector(HMODULE module, const wchar_t* path)
+{
+    if (!module || gpu_arch::Target() != gpu_arch::Family::Turing) return false;
+    const auto* nt = ImageHeaders(module);
+    if (!nt) return false;
+    uint8_t* sites[8]{};
+    size_t alreadyPatched = 0;
+    const size_t found = SafeScanNetworkSelectors(reinterpret_cast<uint8_t*>(module), nt, sites, _countof(sites),
+        &alreadyPatched);
+    if (found == SIZE_MAX || found > _countof(sites))
+    {
+        Log(L"DLSS-G network selector: scan failed or ambiguous (%zu) in %s", found, path ? path : L"");
+        return false;
+    }
+    size_t written = 0;
+    for (size_t i = 0; i < found; ++i)
+    {
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(sites[i], 2, PAGE_EXECUTE_READWRITE, &oldProtect)) continue;
+        sites[i][0] = 0x90;
+        sites[i][1] = 0x90;
+        DWORD ignored = 0;
+        VirtualProtect(sites[i], 2, oldProtect, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), sites[i], 2);
+        ++written;
+    }
+    if (written + alreadyPatched == 0)
+    {
+        Log(L"DLSS-G network selector: not found in %s; Turing needs the PTX network (310.9.x layout)",
+            path ? path : L"");
+        return false;
+    }
+    Log(L"DLSS-G network selector: %zu site(s) forced to the PTX network (%zu already) in %s",
+        written, alreadyPatched, path ? path : L"");
+    return true;
 }
 
 bool PatchDlssgHudlessUiRecomposition(HMODULE module, const wchar_t* path)
@@ -4097,6 +4851,16 @@ void UninstallInterposerDetours()
 
 #include "nvapi_motion_trace.h"
 #include "provider_dispatch_trace.h"
+#include "cu_module_hook.h"
+#include "network_optimizer.h"
+#include "vulkan_nvx.h"
+
+bool VulkanFrameGenerationActive()
+{
+    return vulkan_nvx::InUse();
+}
+#include "sm_emulation.h"
+#include "chain_dump.h"
 
 using PFun_NvAPI_QueryInterface = void*(__stdcall*)(unsigned int InterfaceId);
 PFun_NvAPI_QueryInterface gRealNvAPI_QueryInterface = nullptr;
@@ -4118,8 +4882,13 @@ void* __stdcall HookNvAPI_QueryInterface(unsigned int interfaceId)
     }
     if (gRealNvAPI_QueryInterface)
         return scatter_experiment::kMode == 0
-            ? nvapi_motion_trace::Intercept(interfaceId, gRealNvAPI_QueryInterface(interfaceId))
-            : gRealNvAPI_QueryInterface(interfaceId);
+            ? nvapi_motion_trace::Intercept(interfaceId,
+                cu_module_hook::Intercept(interfaceId,
+                    network_optimizer::Intercept(interfaceId, sm_emulation::Intercept(interfaceId,
+                        chain_dump::Intercept(interfaceId, gRealNvAPI_QueryInterface(interfaceId))))))
+            : cu_module_hook::Intercept(interfaceId,
+                network_optimizer::Intercept(interfaceId, sm_emulation::Intercept(interfaceId,
+                    chain_dump::Intercept(interfaceId, gRealNvAPI_QueryInterface(interfaceId)))));
     return nullptr;
 }
 
@@ -4128,7 +4897,10 @@ void* __stdcall HookNvAPIImpl_QueryInterface(unsigned int interfaceId)
     static std::atomic<bool> seen{false};
     if (!seen.exchange(true)) Log(L"[KERNEL-TRACE] implementation resolver reached");
     if (!gRealNvAPIImpl_QueryInterface) return nullptr;
-    return nvapi_motion_trace::Intercept(interfaceId, gRealNvAPIImpl_QueryInterface(interfaceId));
+    return nvapi_motion_trace::Intercept(interfaceId,
+        cu_module_hook::Intercept(interfaceId,
+            network_optimizer::Intercept(interfaceId, sm_emulation::Intercept(interfaceId,
+                chain_dump::Intercept(interfaceId, gRealNvAPIImpl_QueryInterface(interfaceId))))));
 }
 
 void InstallNvApiHook()
@@ -4215,6 +4987,19 @@ std::atomic<bool> gLoadHooksInstalled{false};
 ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPath, bool forceWrapper = false);
 void OnPotentialModuleLoaded(HMODULE module, LPCWSTR name);
 
+// The DLSS Super Resolution hooks must be in place before the game's first
+// optimal-settings query, which follows the NGX core load immediately.
+void OnLibraryLoaded(HMODULE module, LPCWSTR path)
+{
+    if (!module || !path || reinterpret_cast<uintptr_t>(path) < 0x10000)
+        return;
+    const wchar_t* name = path;
+    for (const wchar_t* p = path; *p; ++p)
+        if (*p == L'\\' || *p == L'/') name = p + 1;
+    if (_wcsicmp(name, L"_nvngx.dll") == 0 || _wcsicmp(name, L"nvngx.dll") == 0)
+        dlss_sr::TryInstall();
+}
+
 HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
 {
     const DWORD incomingError = GetLastError();
@@ -4242,6 +5027,7 @@ HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
         }
     }
     if (trace) Log(L"[LOAD] LoadLibraryW inspection complete: base=%p", mod);
+    OnLibraryLoaded(mod, lpLibFileName);
     SetLastError(loadError);
     return mod;
 }
@@ -4274,6 +5060,8 @@ HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwF
         }
     }
     if (trace) Log(L"[LOAD] LoadLibraryExW inspection complete: base=%p", mod);
+    if ((dwFlags & kDataOnly) == 0)
+        OnLibraryLoaded(mod, lpLibFileName);
     SetLastError(loadError);
     return mod;
 }
@@ -4364,7 +5152,10 @@ static bool SafePatchProvider(HMODULE module, const wchar_t* path) noexcept
 
 ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPath, bool forceWrapper)
 {
-    if (!module)
+    // Test-only: observe (chain_dump) another engine's work without patching
+    // any Streamline or provider module.
+    static const bool observeOnly = GetEnvironmentVariableW(L"DLSSG_TRANSFUSION_OBSERVE_ONLY", nullptr, 0) > 0;
+    if (!module || observeOnly)
         return {};
     const std::wstring path = suppliedPath.empty() ? LoadedModulePath(module) : suppliedPath;
     ModuleRecord snapshot{};
@@ -4405,6 +5196,7 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
             if (existing->ngxExport || existing->ngxPatched)
             {
                 PatchDlssgHudlessUiRecomposition(module, path.c_str());
+                vulkan_nvx::Install(module, path.c_str());
             }
             if (gLogReady.load(std::memory_order_acquire) && !existing->inventoryLogged)
             {
@@ -4456,6 +5248,10 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
             }
             if (record.ngxExport)
             {
+                if (gpu_arch::PreAda())
+                    PatchDlssgMinimumArchitecture(module, path.c_str());
+                if (gpu_arch::Target() == gpu_arch::Family::Turing)
+                    PatchDlssgNetworkSelector(module, path.c_str());
                 const bool archGatesPatched = PatchDlssgArchGates(module, path.c_str());
                 PatchDlssgHudlessUiRecomposition(module, path.c_str());
                 const PatternPatchResult result =
@@ -4467,6 +5263,7 @@ ModuleRecord InspectLoadedModule(HMODULE module, const std::wstring& suppliedPat
                     record.ngxTemporalPatched =
                         SafePatchProvider(module, path.c_str());
                 }
+                vulkan_nvx::Install(module, path.c_str());
             }
             record.inventoryLogged = gLogReady.load(std::memory_order_acquire);
             logInventory = record.inventoryLogged;
@@ -4517,6 +5314,7 @@ void RemoveLoadedModule(HMODULE module)
             gModuleRecords.end());
         RecomputeModuleStateLocked();
     }
+    vulkan_nvx::Forget(module);
     const uintptr_t base = reinterpret_cast<uintptr_t>(module);
     if (gActiveWrapperBase.load(std::memory_order_acquire) == base)
     {
@@ -4561,8 +5359,24 @@ void InspectAlreadyLoadedModules()
                 continue;
             }
             HMODULE module = reinterpret_cast<HMODULE>(entry.modBaseAddr);
+            // Pin the module while it is inspected: the snapshot can list a
+            // module that is unloaded before we read it (Streamline plugins,
+            // NGX model binaries). The reads are guarded, but some games
+            // (Cyberpunk 2077) treat even a handled access violation as a crash
+            // from their vectored handler. Modules already gone are skipped.
+            HMODULE pinned = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    reinterpret_cast<LPCWSTR>(entry.modBaseAddr), &pinned)
+                || pinned != module)
+            {
+                if (pinned)
+                    FreeLibrary(pinned);
+                entry.dwSize = sizeof(entry);
+                continue;
+            }
             loadedModules.push_back(module);
             InspectLoadedModule(module, entry.szExePath);
+            FreeLibrary(pinned);
             entry.dwSize = sizeof(entry);
         } while (Module32NextW(snapshot, &entry));
     }
@@ -4656,157 +5470,285 @@ bool RegisterDllNotification()
     return registered;
 }
 
+// ---------------------------------------------------------------------------
+// Optional overlay / add-on information: UIR, HUD-less and UI alpha sources,
+// and the versions of the loaded DLSS, DLSS-G and Streamline modules.
+
+enum InputSource : uint32_t { kSourceNone = 0, kSourceGame = 1, kSourceAssist = 2 };
+std::atomic<uint32_t> gHudlessSource{kSourceNone};
+std::atomic<uint32_t> gUiAlphaSource{kSourceNone};
+
+std::mutex gModuleVersionMutex;  // also guards the GPU sample and the debug line
+gpu_monitor::Sample gGpuSample;
+bool gGpuSampleValid = false;
+std::atomic<uint64_t> gLastAddonStatusTick{0};
+char gDebugLine[multiplier_overlay::kExtraLineLength] = "";
+char gDlssVersion[24] = "";
+char gDlssgVersion[24] = "";
+char gStreamlineVersion[24] = "";
+
+bool ReadModuleVersion(const wchar_t* moduleName, char* out, size_t size)
+{
+    HMODULE module = GetModuleHandleW(moduleName);
+    wchar_t path[MAX_PATH * 2]{};
+    if (!module || !GetModuleFileNameW(module, path, static_cast<DWORD>(std::size(path))))
+        return false;
+    DWORD ignored = 0;
+    const DWORD bytes = GetFileVersionInfoSizeW(path, &ignored);
+    if (bytes == 0)
+        return false;
+    std::vector<uint8_t> data(bytes);
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT length = 0;
+    if (!GetFileVersionInfoW(path, 0, bytes, data.data())
+        || !VerQueryValueW(data.data(), L"\\", reinterpret_cast<void**>(&info), &length)
+        || !info || length < sizeof(VS_FIXEDFILEINFO))
+        return false;
+    sprintf_s(out, size, "%u.%u.%u", HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
+        HIWORD(info->dwFileVersionLS));
+    return true;
+}
+
+// Worker thread only: keeps file I/O and module lookups off Present.
+void RefreshOverlayInformation(bool versions, bool gpu)
+{
+    const uint32_t viewport = gLastOptionsViewport.load(std::memory_order_acquire);
+    const UiInputSnapshot inputs = viewport != UINT32_MAX ? ReadUiInputSnapshot(viewport) : UiInputSnapshot{};
+    const bool d3d12 = hud_assist::g_d3d12.load(std::memory_order_relaxed);
+    const bool gameHudless = d3d12 ? hud_assist::GameProvidesHudless() : inputs.hudless;
+    const bool gameUi = d3d12 ? hud_assist::GameProvidesUi() : (inputs.uiAlpha || inputs.uiColorAlpha);
+    gHudlessSource.store(gameHudless ? kSourceGame
+        : hud_assist::Recent(hud_assist::g_hudless_copy_tick, 2000) ? kSourceAssist : kSourceNone,
+        std::memory_order_relaxed);
+    gUiAlphaSource.store(gameUi ? kSourceGame
+        : hud_assist::Recent(hud_assist::g_ui_layer_tick, 2000) ? kSourceAssist : kSourceNone,
+        std::memory_order_relaxed);
+    {
+        // Debug line: mode, generated-frame ceiling, Dynamic pacer hook, Streamline result, route.
+        char route[16] = "";
+        strncpy_s(route, PatchRouteName(), _TRUNCATE);
+        _strupr_s(route);
+        const ControlSnapshot snapshot = ReadControlSnapshot();
+        char mode[16] = "";
+        if (GameControlsMultiplier())
+            strcpy_s(mode, "GAME");
+        else if (snapshot.control.dynamic)
+            sprintf_s(mode, "DYN %u", snapshot.control.dynamicTargetFrameRate
+                ? snapshot.control.dynamicTargetFrameRate : DisplayRefreshTargetFps());
+        else
+            sprintf_s(mode, "FIX %uX", snapshot.control.multiplier);
+        char line[multiplier_overlay::kExtraLineLength] = "";
+        sprintf_s(line, "%s MAX %uX PACER %s SL %d %s", mode,
+            gLiveContextMaximumFrames.load(std::memory_order_relaxed) + 1,
+            gCalcHooked.load(std::memory_order_relaxed) ? "ON" : "OFF",
+            gLastSetOptionsResult.load(std::memory_order_relaxed), route);
+        std::lock_guard lock(gModuleVersionMutex);
+        strcpy_s(gDebugLine, line);
+    }
+    // NVML only when something shows it (overlay lines, or the add-on panel open).
+    const bool gpuWanted = gConfigOverlayShowGpu.load(std::memory_order_relaxed)
+        || gConfigOverlayShowVram.load(std::memory_order_relaxed)
+        || GetTickCount64() - gLastAddonStatusTick.load(std::memory_order_relaxed) < 3000;
+    if (gpu && gpuWanted)
+    {
+        gpu_monitor::Sample sample;
+        const bool valid = gpu_monitor::Poll(sample);
+        std::lock_guard lock(gModuleVersionMutex);
+        gGpuSample = sample;
+        gGpuSampleValid = valid;
+    }
+    if (!versions)
+        return;
+    char dlss[24] = "", dlssg[24] = "", streamline[24] = "";
+    ReadModuleVersion(L"nvngx_dlss.dll", dlss, sizeof(dlss));
+    ReadModuleVersion(L"nvngx_dlssg.dll", dlssg, sizeof(dlssg));
+    ReadModuleVersion(L"sl.interposer.dll", streamline, sizeof(streamline));
+    std::lock_guard lock(gModuleVersionMutex);
+    strcpy_s(gDlssVersion, dlss);
+    strcpy_s(gDlssgVersion, dlssg);
+    strcpy_s(gStreamlineVersion, streamline);
+}
+
+const char* SourceName(uint32_t source, const char* assistName)
+{
+    return source == kSourceGame ? "GAME" : source == kSourceAssist ? assistName : "NONE";
+}
+
+// Called on Present by the overlay: never blocks.
+size_t OverlayExtraLines(char (*lines)[multiplier_overlay::kExtraLineLength], size_t maxLines)
+{
+    size_t count = 0;
+    const auto add = [&](auto... args)
+    {
+        if (count < maxLines)
+            sprintf_s(lines[count++], multiplier_overlay::kExtraLineLength, args...);
+    };
+    if (gConfigOverlayShowUir.load(std::memory_order_relaxed))
+    {
+        const bool on = gAppliedUiRecompositionEnabled.load(std::memory_order_relaxed);
+        add("UIR %s", !on ? "OFF" : gAppliedUiRecompositionForced.load(std::memory_order_relaxed) ? "ON FORCED" : "ON");
+    }
+    if (gConfigOverlayShowHudless.load(std::memory_order_relaxed))
+        add("HUDLESS %s", SourceName(gHudlessSource.load(std::memory_order_relaxed), "ASSIST"));
+    if (gConfigOverlayShowUiAlpha.load(std::memory_order_relaxed))
+        add("UI ALPHA %s", SourceName(gUiAlphaSource.load(std::memory_order_relaxed), "INJECTED"));
+    if (gConfigOverlayShowFramePacing.load(std::memory_order_relaxed))
+    {
+        multiplier_overlay::PacingStats pacing;
+        if (multiplier_overlay::GetPacing(pacing))
+            add("FT %.2fMS P99 %.2fMS JIT %.2fMS", pacing.averageUs / 1000.0,
+                pacing.p99Us / 1000.0, pacing.jitterUs / 1000.0);
+    }
+    std::unique_lock lock(gModuleVersionMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return count;
+    if (gConfigOverlayShowGpu.load(std::memory_order_relaxed) && gGpuSampleValid)
+        add("GPU %u%% %uC %uW %uMHZ MEM %uMHZ", gGpuSample.utilization, gGpuSample.temperatureC,
+            (gGpuSample.powerMilliwatts + 500) / 1000, gGpuSample.graphicsClockMhz, gGpuSample.memoryClockMhz);
+    if (gConfigOverlayShowVram.load(std::memory_order_relaxed) && gGpuSampleValid && gGpuSample.vramTotalBytes)
+        add("VRAM %.1f/%.1f GB", gGpuSample.vramUsedBytes / 1073741824.0, gGpuSample.vramTotalBytes / 1073741824.0);
+    if (gConfigOverlayShowVersions.load(std::memory_order_relaxed))
+        add("SR %s FG %s SL %s", gDlssVersion[0] ? gDlssVersion : "-",
+            gDlssgVersion[0] ? gDlssgVersion : "-", gStreamlineVersion[0] ? gStreamlineVersion : "-");
+    if (gConfigOverlayShowDebug.load(std::memory_order_relaxed) && gDebugLine[0])
+        add("%s", gDebugLine);
+    return count;
+}
+
 bool ProcessStandaloneHotkeys(ControlConfig& control, bool& controlChanged)
 {
+    using namespace hotkey_binding;
     controlChanged = false;
-    if (gConfigDisableKeybinds.load(std::memory_order_relaxed))
+    static bool sWasDown[kActionCount]{};
+    static uint64_t sLastFire[kActionCount]{};
+    if (gConfigDisableKeybinds.load(std::memory_order_relaxed)
+        || gHotkeyCaptureActive.load(std::memory_order_relaxed))
+    {
+        std::fill(std::begin(sWasDown), std::end(sWasDown), true);  // no fire on release/resume
         return false;
-    const bool ctrlPressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    const bool altPressed = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-    const bool overlayDown = (GetAsyncKeyState('O') & 0x8000) != 0;
-    static bool sOverlayWasDown = false;
-    const bool overlayPressed = ctrlPressed && altPressed && overlayDown && !sOverlayWasDown;
-    sOverlayWasDown = overlayDown;
-
-    const bool posDown = (GetAsyncKeyState('P') & 0x8000) != 0;
-    static bool sPosWasDown = false;
-    const bool posPressed = ctrlPressed && altPressed && posDown && !sPosWasDown;
-    sPosWasDown = posDown;
-
-    if (!ctrlPressed || !altPressed)
+    }
+    // Only react while the game window has focus.
+    DWORD foregroundPid = 0;
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground || !GetWindowThreadProcessId(foreground, &foregroundPid)
+        || foregroundPid != GetCurrentProcessId())
+    {
+        std::fill(std::begin(sWasDown), std::end(sWasDown), false);
         return false;
+    }
 
-    static uint64_t sLastHotkeyTick = 0;
+    const auto down = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
+    const uint8_t modifiers = static_cast<uint8_t>((down(VK_CONTROL) ? kCtrl : 0)
+        | (down(VK_MENU) ? kAlt : 0) | (down(VK_SHIFT) ? kShift : 0)
+        | ((down(VK_LWIN) || down(VK_RWIN)) ? kWin : 0));
+    const bool shift = (modifiers & kShift) != 0;
     const uint64_t now = GetTickCount64();
-    if (now - sLastHotkeyTick < 200)
+
+    Binding bindings[kActionCount];
+    {
+        std::lock_guard lock(gHotkeyMutex);
+        std::copy(std::begin(gHotkeyBindings), std::end(gHotkeyBindings), std::begin(bindings));
+    }
+
+    int fired = -1;
+    bool fineStep = false;
+    for (uint32_t action = 0; action < kActionCount; ++action)
+    {
+        const bool fpsAction = action == kTargetFpsUp || action == kTargetFpsDown;
+        bool held = false, exact = false;
+        for (const hotkey_binding::KeyChord& chord : bindings[action].chords)
+        {
+            if (!chord.key || !down(chord.key))
+                continue;
+            if (Matches(chord, true, modifiers, false))
+                held = exact = true;
+            else if (Matches(chord, true, modifiers, fpsAction))
+                held = true;
+        }
+        const bool edge = held && !sWasDown[action];
+        const bool repeat = held && Info(action).repeat && now - sLastFire[action] >= 200;
+        sWasDown[action] = held;
+        if (fired < 0 && (edge || repeat))
+        {
+            fired = static_cast<int>(action);
+            fineStep = fpsAction && shift && !exact;
+            sLastFire[action] = now;
+        }
+    }
+    if (fired < 0)
         return false;
 
-    bool changed = false;
-    if (overlayPressed)
+    switch (fired)
+    {
+    case kOverlay:
     {
         const bool visible = !multiplier_overlay::IsVisible();
         multiplier_overlay::SetVisible(visible);
-        changed = true;
         Log(L"[HOTKEY] Overlay %s", visible ? L"enabled" : L"disabled");
+        return true;
     }
-    else if (posPressed)
-    {
+    case kOverlayPosition:
         multiplier_overlay::CyclePosition();
-        changed = true;
         Log(L"[HOTKEY] Overlay position set to %hs",
             multiplier_overlay::PositionToString(multiplier_overlay::GetPosition()));
-    }
-    for (uint32_t mult = 2; mult <= 6; ++mult)
-    {
-        if (changed)
-            break;
-        const int keyChar = '0' + mult;
-        const int keyNumpad = VK_NUMPAD0 + mult;
-        if ((GetAsyncKeyState(keyChar) & 0x8000) != 0 || (GetAsyncKeyState(keyNumpad) & 0x8000) != 0)
-        {
-            control.multiplier = mult;
-            control.dynamic = false;
-            changed = true;
-            controlChanged = true;
-            Log(L"[HOTKEY] Multiplier set to %ux (fixed mode)", mult);
-            break;
-        }
+        return true;
+    case kGameMode:
+        if (gConfigGameMode.exchange(true, std::memory_order_relaxed))
+            return false;
+        control.dynamic = false;
+        controlChanged = true;
+        Log(L"[HOTKEY] Game mode: the game / Profile Inspector decides the multiplier");
+        return true;
+    default:
+        break;
     }
 
-    if (!changed && (GetAsyncKeyState(VK_PRIOR) & 0x8000) != 0) // PageUp
+    if (fired >= kFixed2 && fired <= kFixed6)
     {
-        if (control.multiplier < 6)
-            control.multiplier++;
+        control.multiplier = 2u + static_cast<uint32_t>(fired - kFixed2);
         control.dynamic = false;
-        changed = true;
-        controlChanged = true;
-        Log(L"[HOTKEY] Multiplier increased to %ux (fixed mode)", control.multiplier);
+        Log(L"[HOTKEY] Multiplier set to %ux (fixed mode)", control.multiplier);
     }
-    else if (!changed && (GetAsyncKeyState(VK_NEXT) & 0x8000) != 0) // PageDown
+    else if (fired == kMultiplierUp || fired == kMultiplierDown)
     {
-        if (control.multiplier > 2)
+        if (fired == kMultiplierUp && control.multiplier < kMaximumMultiplier)
+            control.multiplier++;
+        else if (fired == kMultiplierDown && control.multiplier > kMinimumMultiplier)
             control.multiplier--;
         control.dynamic = false;
-        changed = true;
-        controlChanged = true;
-        Log(L"[HOTKEY] Multiplier decreased to %ux (fixed mode)", control.multiplier);
+        Log(L"[HOTKEY] Multiplier %s to %ux (fixed mode)",
+            fired == kMultiplierUp ? L"increased" : L"decreased", control.multiplier);
     }
-    else if (!changed && (GetAsyncKeyState('D') & 0x8000) != 0)
+    else if (fired == kToggleDynamic)
     {
-        control.dynamic = !control.dynamic;
-        if (control.dynamic && control.dynamicTargetFrameRate == 0)
-            control.dynamicTargetFrameRate = 120;
-        changed = true;
-        controlChanged = true;
+        // From game mode, the toggle always selects Dynamic.
+        control.dynamic = gConfigGameMode.load(std::memory_order_relaxed) || !control.dynamic;
         if (control.dynamic)
-        {
-            Log(L"[HOTKEY] Mode toggled: DYNAMIC (target=%u FPS)",
-                control.dynamicTargetFrameRate);
-        }
+            Log(L"[HOTKEY] Mode toggled: DYNAMIC (target=%u FPS%s)",
+                control.dynamicTargetFrameRate ? control.dynamicTargetFrameRate : DisplayRefreshTargetFps(),
+                control.dynamicTargetFrameRate ? L"" : L", display refresh");
         else
-        {
-            Log(L"[HOTKEY] Mode toggled: FIXED (multiplier=%ux)",
-                control.multiplier);
-        }
+            Log(L"[HOTKEY] Mode toggled: FIXED (multiplier=%ux)", control.multiplier);
     }
-    else if (!changed)
+    else if (fired == kTargetFpsUp || fired == kTargetFpsDown)
     {
-        const bool shiftPressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-        const uint32_t step = shiftPressed ? 1 : 5;
-
-        const bool upPressed = (GetAsyncKeyState(VK_UP) & 0x8000) != 0
-            || (GetAsyncKeyState(VK_OEM_PLUS) & 0x8000) != 0
-            || (GetAsyncKeyState(VK_ADD) & 0x8000) != 0;
-        const bool downPressed = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0
-            || (GetAsyncKeyState(VK_OEM_MINUS) & 0x8000) != 0
-            || (GetAsyncKeyState(VK_SUBTRACT) & 0x8000) != 0;
-
-        if (upPressed)
-        {
-            uint32_t newTarget = control.dynamicTargetFrameRate;
-            if (newTarget == 0)
-                newTarget = 60;
-            else if (newTarget + step <= 1000)
-                newTarget += step;
-            else
-                newTarget = 1000;
-
-            if (newTarget != control.dynamicTargetFrameRate || !control.dynamic)
-            {
-                control.dynamicTargetFrameRate = newTarget;
-                control.dynamic = true;
-                changed = true;
-                controlChanged = true;
-                Log(L"[HOTKEY] Dynamic target FPS increased to %u FPS (dynamic mode enabled)",
-                    control.dynamicTargetFrameRate);
-            }
-        }
-        else if (downPressed)
-        {
-            uint32_t newTarget = control.dynamicTargetFrameRate;
-            if (newTarget == 0)
-                newTarget = 60;
-            else if (newTarget > 30 + step)
-                newTarget -= step;
-            else
-                newTarget = 30;
-
-            if (newTarget != control.dynamicTargetFrameRate || !control.dynamic)
-            {
-                control.dynamicTargetFrameRate = newTarget;
-                control.dynamic = true;
-                changed = true;
-                controlChanged = true;
-                Log(L"[HOTKEY] Dynamic target FPS decreased to %u FPS (dynamic mode enabled)",
-                    control.dynamicTargetFrameRate);
-            }
-        }
+        const uint32_t step = fineStep ? 1u : 5u;
+        uint32_t target = control.dynamicTargetFrameRate ? control.dynamicTargetFrameRate : DisplayRefreshTargetFps();
+        if (fired == kTargetFpsUp)
+            target = std::min<uint32_t>(target + step, 1000u);
+        else
+            target = target > 30u + step ? target - step : 30u;
+        control.dynamicTargetFrameRate = target;
+        control.dynamic = true;
+        Log(L"[HOTKEY] Dynamic target FPS %s to %u FPS (dynamic mode enabled)",
+            fired == kTargetFpsUp ? L"increased" : L"decreased", target);
     }
+    controlChanged = true;
 
-    if (changed)
-        sLastHotkeyTick = now;
-
-    return changed;
+    // A multiplier/mode hotkey is an explicit manual choice: leave game mode.
+    if (gConfigGameMode.exchange(false, std::memory_order_relaxed))
+        Log(L"[HOTKEY] Leaving game mode (%s mode now active)", control.dynamic ? L"dynamic" : L"fixed");
+    return true;
 }
 
 DWORD WINAPI PatchWorker(void* context)
@@ -4830,10 +5772,17 @@ DWORD WINAPI PatchWorker(void* context)
     // DXGI and D3D12 initialization may load modules and install detours. Doing
     // that work from DLL_PROCESS_ATTACH holds the Windows loader lock and can
     // deadlock engines which initialize graphics on another startup thread.
+    if (GetEnvironmentVariableW(L"DLSSG_TRANSFUSION_OBSERVE_ONLY", nullptr, 0) > 0)
+        Log(L"WARNING: DLSSG_TRANSFUSION_OBSERVE_ONLY is set: test mode, no Streamline or provider module is patched "
+            L"(X3 and above are refused). Remove the variable, then restart Explorer or sign out so that Steam no longer inherits it.");
+    multiplier_overlay::SetLog([](const char* text) { Log(L"%hs", text); });
     const bool overlayHooksInstalled = multiplier_overlay::Install(
         &gActualFramesPresented, &gAppliedMultiplier, &gGameFrameGenerationOn,
         &gFrameGenerationSession, &gActualMultiplierSampleTick);
     Log(L"Native multiplier overlay hooks installed: %d", overlayHooksInstalled);
+    multiplier_overlay::SetExtraLines(&OverlayExtraLines);
+    dlss_sr::g_log = [](const char* text) { Log(L"%hs", text); };
+    unreal_screen_percentage::g_log = [](const char* text) { Log(L"%hs", text); };
 
     const std::wstring mappingName = MfgUnlockObjectName(L"Status", pid);
     HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mappingName.c_str());
@@ -4847,6 +5796,7 @@ DWORD WINAPI PatchWorker(void* context)
     GetModuleFileNameW(nullptr, executablePath, _countof(executablePath));
     const std::wstring executableDirectory = ParentPath(executablePath);
     gConfigPath = ResolveConfigPath(static_cast<HMODULE>(context), executableDirectory);
+    gConfigPathReady.store(true, std::memory_order_release);
 
     const std::wstring cetDir = JoinPath(executableDirectory,
         L"plugins\\cyber_engine_tweaks\\mods\\DLSSG-Transfusion");
@@ -4871,8 +5821,11 @@ DWORD WINAPI PatchWorker(void* context)
     StoreControl(initialControl);
     midpoint_fix::SetBlackwellTransfusionEnabled(gConfigBlackwellTransfusion.load(std::memory_order_relaxed));
     midpoint_fix::SetQualityFixEnabled(gConfigQualityFix.load(std::memory_order_relaxed));
-    Log(L"Quality valid-warp fix requested=%d (provider-load setting; restart required to change)",
-        gConfigQualityFix.load(std::memory_order_relaxed));
+    midpoint_fix::SetQualityPolicyExplainedWarp(gConfigQualityPolicyExplainedWarp.load(std::memory_order_relaxed));
+    midpoint_fix::SetOptimizedKernels(gConfigOptimizedKernels.load(std::memory_order_relaxed));
+    Log(L"Quality valid-warp fix requested=%d policy=%hs (provider-load setting; restart required to change)",
+        gConfigQualityFix.load(std::memory_order_relaxed),
+        gConfigQualityPolicyExplainedWarp.load(std::memory_order_relaxed) ? "explained-warp" : "transfusion");
     midpoint_fix::SetMvDilationDisabled(gConfigDisableMvDilation.load(std::memory_order_relaxed));
     if (!IsRegularFile(gConfigPath))
     {
@@ -4883,7 +5836,7 @@ DWORD WINAPI PatchWorker(void* context)
     ReadLastWriteTime(gConfigPath, configWriteTime);
     Log(L"Initial control: mode=%s multiplier=%ux disableKeybinds=%d dynamicTarget=%u FPS "
         L"dynamicExperimental56=%d blackwellTransfusion=%d disableMenuDetection=%d disableMvDilation=%d forceUiRecomposition=%d logPerformance=%d logMotionTracing=%d; config: %s",
-        initialControl.dynamic ? L"dynamic" : L"fixed", initialControl.multiplier,
+        ControlModeName(initialControl), initialControl.multiplier,
         gConfigDisableKeybinds.load(std::memory_order_relaxed) ? 1 : 0,
         initialControl.dynamicTargetFrameRate, initialControl.dynamicExperimental56,
         gConfigBlackwellTransfusion.load(std::memory_order_relaxed),
@@ -4970,6 +5923,13 @@ DWORD WINAPI PatchWorker(void* context)
         if (gStopWorker.load(std::memory_order_relaxed))
             break;
         Sleep(50);
+        static uint32_t sOverlayInfoTicks = 0;
+        if (++sOverlayInfoTicks % 5 == 0)  // 250 ms; GPU every 1 s, module versions every 5 s
+        {
+            RefreshOverlayInformation(sOverlayInfoTicks % 100 == 5, sOverlayInfoTicks % 20 == 0);
+            dlss_sr::TryInstall();
+            unreal_screen_percentage::Tick(ConfiguredDlssScale());
+        }
         if (++diagnosticTicks >= 100 && GetTickCount64() - diagnosticStart < 120000)
         {
             diagnosticTicks = 0;
@@ -5018,7 +5978,7 @@ DWORD WINAPI PatchWorker(void* context)
                 WriteBridgeStatus(activeControl, pid);
                 Log(L"Live control requested: mode=%s multiplier=%ux dynamicTarget=%u FPS "
                     L"dynamicExperimental56=%d",
-                    activeControl.dynamic ? L"dynamic" : L"fixed", activeControl.multiplier,
+                    ControlModeName(activeControl), activeControl.multiplier,
                     activeControl.dynamicTargetFrameRate,
                     activeControl.dynamicExperimental56);
             }
@@ -5051,6 +6011,39 @@ DWORD WINAPI PatchWorker(void* context)
 }
 }
 
+// The provider patches depend on the GPU generation, and the provider can be
+// loaded before the worker reads the configuration: decide at process attach.
+void InitializeGpuArchitecture(HINSTANCE instance)
+{
+    const std::wstring configPath = ResolveConfigPath(instance, gExecutableDirectory);
+    HANDLE file = CreateFileW(configPath.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        std::array<char, 16384> buffer{};
+        DWORD bytesRead = 0;
+        gpu_arch::Family configured = gpu_arch::Family::Unknown;
+        if (ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &bytesRead, nullptr)
+            && TryParseGpuArchitecture(std::string(buffer.data(), bytesRead), configured))
+            gConfigGpuArchitecture.store(configured, std::memory_order_relaxed);
+        CloseHandle(file);
+    }
+
+    // The environment override is for testing and is never persisted.
+    gpu_arch::Family forced = gConfigGpuArchitecture.load(std::memory_order_relaxed);
+    char overrideName[16]{};
+    const DWORD overrideLength = GetEnvironmentVariableA(
+        "DLSSG_TRANSFUSION_GPU_ARCH", overrideName, sizeof(overrideName));
+    if (overrideLength > 0 && overrideLength < sizeof(overrideName))
+        gpu_arch::TryParse(overrideName, overrideLength, forced);
+
+    gpu_arch::Initialize(forced);
+    midpoint_fix::SetTargetSm(gpu_arch::SmVersion());
+    Log(L"GPU architecture: %s; kernels compiled for sm_%u, NGX architecture 0x%x",
+        gpu_arch::Describe(), gpu_arch::SmVersion(), gpu_arch::NgxArchitecture());
+}
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
@@ -5070,6 +6063,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         GetModuleFileNameW(nullptr, executablePath, _countof(executablePath));
         gExecutableDirectory = ParentPath(executablePath);
         InitLogging(instance, gExecutableDirectory);
+        InitializeGpuArchitecture(instance);
+        hud_assist::g_log = [](const char* text) { Log(L"%hs", text); };
+        hud_assist::g_submit = &SubmitUiAssistTag;
         gLiveHookInstalled.store(InstallFeatureFunctionHook(), std::memory_order_release);
         InstallD3DDeviceHook();
         InstallVulkanInfoHook();
@@ -5107,4 +6103,137 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
         }
     }
     return TRUE;
+}
+
+// Optional ReShade add-on interface (see addon_api.h). The add-on edits
+// DLSSG-Transfusion.json directly; the worker's live reload applies it.
+extern "C" __declspec(dllexport) uint32_t __stdcall DLSSGTransfusion_GetConfigPath(
+    wchar_t* buffer, uint32_t capacity)
+{
+    if (!buffer || capacity == 0 || !gConfigPathReady.load(std::memory_order_acquire))
+        return 0;
+    const size_t length = gConfigPath.size();
+    if (length == 0 || length >= capacity)
+        return 0;
+    wmemcpy(buffer, gConfigPath.c_str(), length + 1);
+    return static_cast<uint32_t>(length);
+}
+
+extern "C" __declspec(dllexport) int __stdcall DLSSGTransfusion_GetStatus(DLSSGTStatus* status)
+{
+    if (!status || status->size < sizeof(DLSSGTStatus) || status->version != DLSSGT_ADDON_API_VERSION)
+        return 0;
+    const uint64_t now = GetTickCount64();
+    const auto age = [now](uint64_t tick) -> uint32_t
+    {
+        return tick == 0 || now < tick ? UINT32_MAX : static_cast<uint32_t>(std::min<uint64_t>(now - tick, UINT32_MAX));
+    };
+    const bool frameGenerationOn = gGameFrameGenerationOn.load(std::memory_order_acquire);
+    status->bridgeReady = BridgeReady() ? 1u : 0u;
+    status->frameGenerationOn = frameGenerationOn ? 1u : 0u;
+    status->pending = frameGenerationOn
+        && gDesiredRevision.load(std::memory_order_acquire) != gAppliedRevision.load(std::memory_order_acquire);
+    status->setOptionsSeen = gSetOptionsSeen.load(std::memory_order_acquire) ? 1u : 0u;
+    status->setOptionsResult = gLastSetOptionsResult.load(std::memory_order_relaxed);
+    status->appliedMultiplier = gAppliedMultiplier.load(std::memory_order_relaxed);
+    status->actualFramesPresented = gActualFramesPresented.load(std::memory_order_relaxed);
+    status->stateSampleAgeMs = age(gStateSampleTick.load(std::memory_order_acquire));
+    // Rendered frames: the game's unique frame tokens when they are fresh.
+    // Counting slDLSSGGetState calls instead doubles the rate in games that
+    // call it twice per frame (No Man's Sky).
+    const uint64_t sourceTick = gSourceFpsTick.load(std::memory_order_acquire);
+    if (sourceTick && GetTickCount64() - sourceTick < 2000)
+    {
+        const uint32_t actual = gActualFramesPresented.load(std::memory_order_relaxed);
+        const uint32_t sourceMilli = gSourceFpsMilli.load(std::memory_order_relaxed);
+        status->realFpsMilli = sourceMilli;
+        status->dlssFpsMilli = static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX,
+            uint64_t(sourceMilli) * (actual >= 1 && actual <= 6 ? actual : 1)));
+        status->fpsSampleAgeMs = age(sourceTick);
+    }
+    else
+    {
+        status->realFpsMilli = gRealFpsMilli.load(std::memory_order_relaxed);
+        status->dlssFpsMilli = gDlssFpsMilli.load(std::memory_order_relaxed);
+        status->fpsSampleAgeMs = age(gFpsSampleTick.load(std::memory_order_acquire));
+    }
+    strncpy_s(status->route, PatchRouteName(), _TRUNCATE);
+    status->uiRecomposition = !gAppliedUiRecompositionEnabled.load(std::memory_order_relaxed) ? 0u
+        : gAppliedUiRecompositionForced.load(std::memory_order_relaxed) ? 2u : 1u;
+    status->hudlessSource = gHudlessSource.load(std::memory_order_relaxed);
+    status->uiAlphaSource = gUiAlphaSource.load(std::memory_order_relaxed);
+    {
+        std::lock_guard lock(gModuleVersionMutex);
+        strcpy_s(status->dlssVersion, gDlssVersion);
+        strcpy_s(status->dlssgVersion, gDlssgVersion);
+        strcpy_s(status->streamlineVersion, gStreamlineVersion);
+        status->gpuValid = gGpuSampleValid ? 1u : 0u;
+        status->gpuUtilization = gGpuSample.utilization;
+        status->gpuTemperatureC = gGpuSample.temperatureC;
+        status->gpuPowerMilliwatts = gGpuSample.powerMilliwatts;
+        status->gpuClockMhz = gGpuSample.graphicsClockMhz;
+        status->gpuMemoryClockMhz = gGpuSample.memoryClockMhz;
+        status->vramUsedMb = static_cast<uint32_t>(gGpuSample.vramUsedBytes >> 20);
+        status->vramTotalMb = static_cast<uint32_t>(gGpuSample.vramTotalBytes >> 20);
+        strncpy_s(status->debugLine, gDebugLine, _TRUNCATE);
+    }
+    multiplier_overlay::PacingStats pacing;
+    status->pacingValid = multiplier_overlay::GetPacing(pacing) ? 1u : 0u;
+    status->pacingAverageUs = pacing.averageUs;
+    status->pacingP99Us = pacing.p99Us;
+    status->pacingJitterUs = pacing.jitterUs;
+    gLastAddonStatusTick.store(now, std::memory_order_relaxed);  // keeps NVML polling while the panel is open
+    const dlss_sr::Status sr = dlss_sr::Snapshot();
+    status->srHooked = dlss_sr::Hooked() ? 1u : 0u;
+    status->srScale = sr.scale;
+    status->srObserved = dlss_sr::Fresh(sr, now) ? 1u : 0u;
+    status->srVerified = dlss_sr::Verified(sr, now) ? 1u : 0u;
+    status->srInputWidth = sr.inputWidth;
+    status->srInputHeight = sr.inputHeight;
+    status->srOutputWidth = sr.outputWidth;
+    status->srOutputHeight = sr.outputHeight;
+    status->unrealState = static_cast<uint32_t>(unreal_screen_percentage::g_state.load());
+    status->unrealScreenPercentageMilli = static_cast<uint32_t>(unreal_screen_percentage::g_current.load() * 1000.f + .5f);
+    return 1;
+}
+
+// The overlay text for the ReShade add-on (addon_api.h). The first line
+// follows the DXGI overlay's rules; its frame rates are the game's source
+// frames and that rate times the multiplier.
+extern "C" __declspec(dllexport) int __stdcall DLSSGTransfusion_GetOverlay(DLSSGTOverlay* overlay)
+{
+    if (!overlay || overlay->size < sizeof(DLSSGTOverlay))
+        return 0;
+    const uint32_t size = overlay->size;
+    std::memset(overlay, 0, sizeof(DLSSGTOverlay));
+    overlay->size = size;
+    overlay->visible = multiplier_overlay::IsVisible() ? 1u : 0u;
+    overlay->position = static_cast<uint32_t>(multiplier_overlay::GetPosition());
+    const uint64_t now = GetTickCount64();
+    const uint64_t drawn = multiplier_overlay::LastDrawTick();
+    overlay->nativeDrawing = drawn && now - drawn < 1000 ? 1u : 0u;
+    if (!overlay->visible || !gGameFrameGenerationOn.load(std::memory_order_acquire))
+        return 1;
+    uint32_t multiplier = gActualFramesPresented.load(std::memory_order_relaxed);
+    const uint64_t sampled = gActualMultiplierSampleTick.load(std::memory_order_acquire);
+    if (multiplier == 1)
+        return 1; // frame generation suspended (menu, loading)
+    if (multiplier == 0 && (!sampled || now - sampled > 2500))
+        multiplier = gAppliedMultiplier.load(std::memory_order_relaxed);
+    const uint64_t sourceTick = gSourceFpsTick.load(std::memory_order_acquire);
+    if (multiplier < 2 || multiplier > 6 || !sourceTick || now - sourceTick > 2000)
+        return 1;
+    const uint32_t sourceMilli = gSourceFpsMilli.load(std::memory_order_relaxed);
+    static_assert(DLSSGT_OVERLAY_LINE_LENGTH == multiplier_overlay::kExtraLineLength);
+    static_assert(DLSSGT_OVERLAY_MAX_LINES == 1 + multiplier_overlay::kMaxExtraLines);
+    sprintf_s(overlay->lines[0], "%u/%u fps %ux", (sourceMilli * multiplier + 500u) / 1000u,
+        (sourceMilli + 500u) / 1000u, multiplier);
+    overlay->lineCount = 1 + static_cast<uint32_t>(std::min<size_t>(
+        OverlayExtraLines(overlay->lines + 1, multiplier_overlay::kMaxExtraLines), multiplier_overlay::kMaxExtraLines));
+    return 1;
+}
+
+extern "C" __declspec(dllexport) void __stdcall DLSSGTransfusion_SetHotkeyCapture(int active)
+{
+    gHotkeyCaptureActive.store(active != 0, std::memory_order_relaxed);
 }

@@ -13,7 +13,7 @@ set_target_properties(StartupInterposer PROPERTIES OUTPUT_NAME "sl.interposer")
 add_executable(StartupHookHarness main.cpp "${NATIVE}/midpoint_fix.cpp"
     "${NATIVE}/crash_diagnostics.cpp"
     "${NATIVE}/dlssg_provider_policy.cpp" "${NATIVE}/proxy.cpp"
-    "${NATIVE}/proxy_thunks.asm")
+    "${NATIVE}/proxy_thunks.asm" "${NATIVE}/vulkan_nvx_thunks.asm")
 target_compile_features(StartupHookHarness PRIVATE cxx_std_20)
 target_compile_definitions(StartupHookHarness PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_include_directories(StartupHookHarness PRIVATE "${STREAMLINE_ROOT}/include")

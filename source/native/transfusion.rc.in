@@ -1,18 +1,18 @@
 #include <windows.h>
 
-#define VER_FILEVERSION             1,4,5,0
-#define VER_FILEVERSION_STR         "1.4.5.0\0"
+#define VER_FILEVERSION             @TRANSFUSION_VERSION_NUMERIC@
+#define VER_FILEVERSION_STR         "@TRANSFUSION_VERSION@\0"
 
-#define VER_PRODUCTVERSION          1,4,5,0
-#define VER_PRODUCTVERSION_STR      "1.4.5\0"
+#define VER_PRODUCTVERSION          @TRANSFUSION_VERSION_NUMERIC@
+#define VER_PRODUCTVERSION_STR      "@TRANSFUSION_VERSION@\0"
 
-#define VER_COMPANYNAME_STR         "DLSSG-Transfusion Team\0"
-#define VER_FILEDESCRIPTION_STR     "DLSSG-Transfusion (Universal Blackwell Transfusion & Multi-Game Edition)\0"
+#define VER_COMPANYNAME_STR         "@TRANSFUSION_COMPANY@\0"
+#define VER_FILEDESCRIPTION_STR     "@TRANSFUSION_DESCRIPTION@\0"
 #define VER_INTERNALNAME_STR        "@RC_INTERNAL_NAME@\0"
 #define VER_LEGALCOPYRIGHT_STR      "Copyright (C) 2026\0"
 #define VER_ORIGINALFILENAME_STR    "@RC_ORIGINAL_FILENAME@\0"
 #define VER_PRODUCTNAME_STR         "DLSSG-Transfusion\0"
-#define VER_COMMENTS_STR            "Universal Blackwell Frame Generation Transfusion for Ada & RTX 40 Series GPUs\0"
+#define VER_COMMENTS_STR            "Universal Blackwell Frame Generation Transfusion for RTX 20, 30 and 40 Series GPUs\0"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     VER_FILEVERSION
