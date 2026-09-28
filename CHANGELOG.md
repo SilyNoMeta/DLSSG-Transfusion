@@ -1,4 +1,26 @@
-# DLSSG-Transfusion v1.4.5.0-rtx20-30-40
+# DLSSG-Transfusion v1.4.5.1-rtx20-30-40
+
+## v1.4.5.1-rtx20-30-40 — experimental Smooth Motion on RTX 30
+
+- Added an opt-in SM86 FP16 Smooth Motion prototype for NVIDIA driver 617.14,
+  selected by `smoothMotionSm86` and `smoothMotionSm86Api` (`d3d12`, `d3d11`,
+  `vulkan`). It is disabled by default; unknown driver binaries are refused.
+- In-game observations: Manor Lords (D3D12) and Shadows of Doubt (D3D11)
+  showed 120 FPS with a 60 FPS game cap in FrameView. Enshrouded (Vulkan)
+  worked with the NVIDIA profile Off after the exact-build in-memory gate
+  patch; its final FrameView value was not recorded. These are limited user
+  tests, not a compatibility or visual-quality guarantee.
+- The Vulkan bypass requires matching `NvPresent64.dll` and `nvoglv64.dll`
+  files from the inspected driver package. RTX 20/Turing and FP8 are not
+  supported. See [SMOOTH-MOTION-SM86.md](docs/SMOOTH-MOTION-SM86.md) and
+  [SMOOTH-MOTION-SM86.fr.md](docs/SMOOTH-MOTION-SM86.fr.md).
+- Known issue under investigation: one Starfield user reported a crash when
+  enabling DLSS-G with the D3D12 `uiAssist` path active. It has not reproduced
+  in a second Starfield installation. If affected, set `"uiAssist": false` in
+  `DLSSG-Transfusion.json`; the cause and any interaction with other mods or
+  NVIDIA's OTA Streamline provider are not yet established.
+
+## v1.4.5.0-rtx20-30-40
 
 Fork of [TonyJoaca/DLSSG-Transfusion](https://github.com/TonyJoaca/DLSSG-Transfusion) v1.4.5 for **RTX 20, 30 and 40**. Tony's patches on NVIDIA's runtime remain the engine; everything from v1.4.5 is included. This first public release gathers the private builds v1.4.5.1 to v1.4.5.3-rtx2030 and the work done since (Vulkan).
 

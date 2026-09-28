@@ -38,6 +38,8 @@
     "uiAssist": true                         // D3D12: capture the HUD-less scene and build the UI layer when the game does not tag them.
   },
   "compatibility": {
+    "smoothMotionSm86": false,               // Experimental RTX 30 driver Smooth Motion, only on the verified NVIDIA 617.14 build. Restart the game to apply.
+    "smoothMotionSm86Api": "d3d12",          // Match the active graphics API (Direct3D 12/11 or Vulkan), not the engine. Find the game's API section via https://www.pcgamingwiki.com/ and restart the game.
     "disableMenuDetection": false,           // Keep frame generation running in menus and loading screens. Leave false: idling at 1x there avoids device-hang crashes.
     "forceOTA": false,                       // Load the Frame Generation models downloaded by the NVIDIA App. Restart the game to apply.
     "patchFlipMetering": false,              // OptiScaler flip metering bypass, only for setups that need it. Restart the game to apply.

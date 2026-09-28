@@ -1,4 +1,5 @@
 /build/
+/build-sm86/
 /build-tests/
 /outputs/
 /test_runs/
@@ -26,7 +27,7 @@ tests/live_control_harness/build/
 
 /capture-review/
 /scratch/
-scripts/__pycache__/
+**/__pycache__/
 
 # Kernels that are not published (docs/PUBLIC-SOURCE.md)
 /source/native/private/

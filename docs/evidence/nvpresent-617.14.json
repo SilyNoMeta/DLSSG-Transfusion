@@ -1,0 +1,1234 @@
+{
+  "file": {
+    "name": "NvPresent64.dll",
+    "size": 8525544,
+    "sha256": "1716d13d169320a2dc71486733202ed75127e8f39cd679a9193848fc1fa45e7f",
+    "driver_build_string": "DVSReal r617_07 617.14 DVS-Applications",
+    "pdb_path": "C:\\dvs\\p4\\build\\sw\\rel\\gpu_drv\\r615\\r617_07\\drivers\\nvpresent\\_out\\wddm2_amd64_release\\NvPresent64.pdb"
+  },
+  "exports": {
+    "NVP_CreateDevice": "0x5980",
+    "NVP_CreateSwapchain_D3D11": "0x5990",
+    "NVP_CreateSwapchain_D3D12": "0x59a0",
+    "NVP_DestroyDevice": "0x59b0",
+    "NVP_DestroySwapchain": "0x59c0",
+    "NVP_Init_D3D": "0x59e0",
+    "NVP_Init_Vulkan": "0x5a50"
+  },
+  "initialization": {
+    "nvp_init_d3d_rva": "0x59e0",
+    "config_rva": "0x7f0cd0",
+    "gate_candidates": [
+      {
+        "cmp_instruction_rva": "0xc41c",
+        "cmp_immediate_rva": "0xc41f",
+        "setge_rva": "0xc437"
+      }
+    ],
+    "arch_getter_rva": "0xbd10",
+    "precision_selector_cmp_rva": "0x7ffce",
+    "cuda_resolver_rva": "0x1348d0",
+    "config_formula_rva": "0xa05b"
+  },
+  "fatbins": {
+    "count": 37,
+    "ptx_entries": 0,
+    "cubin_architectures": {
+      "sm_120": 37,
+      "sm_89": 37
+    },
+    "sm89_fp16_kernels": 20,
+    "sm89_fp8_kernels": 17,
+    "sm89_elf_flags": [
+      "0x06005904"
+    ],
+    "containers": [
+      {
+        "index": 1,
+        "file_offset": "0x4a7820",
+        "size": 18648,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "depth_to_space"
+        ]
+      },
+      {
+        "index": 2,
+        "file_offset": "0x4ac100",
+        "size": 45808,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "downscale_kernel"
+        ]
+      },
+      {
+        "index": 3,
+        "file_offset": "0x4b7400",
+        "size": 24792,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "warp_coarse_kernel"
+        ]
+      },
+      {
+        "index": 4,
+        "file_offset": "0x4bd4e0",
+        "size": 297384,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "attn1"
+        ]
+      },
+      {
+        "index": 5,
+        "file_offset": "0x505e90",
+        "size": 225368,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "attn2"
+        ]
+      },
+      {
+        "index": 6,
+        "file_offset": "0x53cef0",
+        "size": 41888,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv1"
+        ]
+      },
+      {
+        "index": 7,
+        "file_offset": "0x5472a0",
+        "size": 41888,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv2"
+        ]
+      },
+      {
+        "index": 8,
+        "file_offset": "0x551650",
+        "size": 23368,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv3"
+        ]
+      },
+      {
+        "index": 9,
+        "file_offset": "0x5571a0",
+        "size": 48840,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv4"
+        ]
+      },
+      {
+        "index": 10,
+        "file_offset": "0x563070",
+        "size": 48840,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv5"
+        ]
+      },
+      {
+        "index": 11,
+        "file_offset": "0x56ef40",
+        "size": 83264,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv6"
+        ]
+      },
+      {
+        "index": 12,
+        "file_offset": "0x583490",
+        "size": 136864,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv7"
+        ]
+      },
+      {
+        "index": 13,
+        "file_offset": "0x5a4b40",
+        "size": 136864,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv8"
+        ]
+      },
+      {
+        "index": 14,
+        "file_offset": "0x5c61f0",
+        "size": 208232,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_fused"
+        ]
+      },
+      {
+        "index": 15,
+        "file_offset": "0x5f8f60",
+        "size": 82664,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_proj1"
+        ]
+      },
+      {
+        "index": 16,
+        "file_offset": "0x60d250",
+        "size": 276992,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_proj2"
+        ]
+      },
+      {
+        "index": 17,
+        "file_offset": "0x650c60",
+        "size": 28904,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_out1"
+        ]
+      },
+      {
+        "index": 18,
+        "file_offset": "0x657d50",
+        "size": 36760,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_out2"
+        ]
+      },
+      {
+        "index": 19,
+        "file_offset": "0x660cf0",
+        "size": 30712,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_out3"
+        ]
+      },
+      {
+        "index": 20,
+        "file_offset": "0x6684f0",
+        "size": 20096,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "depth_to_space_fp8"
+        ]
+      },
+      {
+        "index": 21,
+        "file_offset": "0x66d380",
+        "size": 256112,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "attn1_fp8"
+        ]
+      },
+      {
+        "index": 22,
+        "file_offset": "0x6abc00",
+        "size": 173480,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "attn2_fp8"
+        ]
+      },
+      {
+        "index": 23,
+        "file_offset": "0x6d61b0",
+        "size": 42720,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv1_fp8"
+        ]
+      },
+      {
+        "index": 24,
+        "file_offset": "0x6e08a0",
+        "size": 46536,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv2_fp8"
+        ]
+      },
+      {
+        "index": 25,
+        "file_offset": "0x6ebe70",
+        "size": 24456,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv3_fp8"
+        ]
+      },
+      {
+        "index": 26,
+        "file_offset": "0x6f1e00",
+        "size": 53752,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv4_fp8"
+        ]
+      },
+      {
+        "index": 27,
+        "file_offset": "0x6ff000",
+        "size": 53752,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv5_fp8"
+        ]
+      },
+      {
+        "index": 28,
+        "file_offset": "0x70c200",
+        "size": 70312,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv6_fp8"
+        ]
+      },
+      {
+        "index": 29,
+        "file_offset": "0x71d4b0",
+        "size": 104640,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv7_fp8"
+        ]
+      },
+      {
+        "index": 30,
+        "file_offset": "0x736d80",
+        "size": 104640,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv8_fp8"
+        ]
+      },
+      {
+        "index": 31,
+        "file_offset": "0x750650",
+        "size": 174032,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_fused_fp8"
+        ]
+      },
+      {
+        "index": 32,
+        "file_offset": "0x77ae30",
+        "size": 86752,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_proj1_fp8"
+        ]
+      },
+      {
+        "index": 33,
+        "file_offset": "0x790120",
+        "size": 260120,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_proj2_fp8"
+        ]
+      },
+      {
+        "index": 34,
+        "file_offset": "0x7cf940",
+        "size": 30576,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_out1_fp8"
+        ]
+      },
+      {
+        "index": 35,
+        "file_offset": "0x7d70c0",
+        "size": 39568,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_out2_fp8"
+        ]
+      },
+      {
+        "index": 36,
+        "file_offset": "0x7e0b60",
+        "size": 33216,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "conv_out3_fp8"
+        ]
+      },
+      {
+        "index": 37,
+        "file_offset": "0x7e8d30",
+        "size": 13416,
+        "architectures": [
+          120,
+          89
+        ],
+        "kernels": [
+          "main_kernel"
+        ]
+      }
+    ],
+    "cubins": [
+      {
+        "fatbin_index": 1,
+        "fatbin_file_offset": 4880416,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 10672,
+        "kernel": "depth_to_space",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 1,
+        "fatbin_file_offset": 4880416,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 7776,
+        "kernel": "depth_to_space",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 2,
+        "fatbin_file_offset": 4899072,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 25288,
+        "kernel": "downscale_kernel",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 2,
+        "fatbin_file_offset": 4899072,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 20320,
+        "kernel": "downscale_kernel",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 3,
+        "fatbin_file_offset": 4944896,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 14768,
+        "kernel": "warp_coarse_kernel",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 3,
+        "fatbin_file_offset": 4944896,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 9824,
+        "kernel": "warp_coarse_kernel",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 4,
+        "fatbin_file_offset": 4969696,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 184000,
+        "kernel": "attn1",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 4,
+        "fatbin_file_offset": 4969696,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 113184,
+        "kernel": "attn1",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 5,
+        "fatbin_file_offset": 5267088,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 144944,
+        "kernel": "attn2",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 5,
+        "fatbin_file_offset": 5267088,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 80224,
+        "kernel": "attn2",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 6,
+        "fatbin_file_offset": 5492464,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 23544,
+        "kernel": "conv1",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 6,
+        "fatbin_file_offset": 5492464,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 18144,
+        "kernel": "conv1",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 7,
+        "fatbin_file_offset": 5534368,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 23544,
+        "kernel": "conv2",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 7,
+        "fatbin_file_offset": 5534368,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 18144,
+        "kernel": "conv2",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 8,
+        "fatbin_file_offset": 5576272,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 13152,
+        "kernel": "conv3",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 8,
+        "fatbin_file_offset": 5576272,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 10016,
+        "kernel": "conv3",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 9,
+        "fatbin_file_offset": 5599648,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 28192,
+        "kernel": "conv4",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 9,
+        "fatbin_file_offset": 5599648,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 20448,
+        "kernel": "conv4",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 10,
+        "fatbin_file_offset": 5648496,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 28192,
+        "kernel": "conv5",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 10,
+        "fatbin_file_offset": 5648496,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 20448,
+        "kernel": "conv5",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 11,
+        "fatbin_file_offset": 5697344,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 44120,
+        "kernel": "conv6",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 11,
+        "fatbin_file_offset": 5697344,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 38944,
+        "kernel": "conv6",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 12,
+        "fatbin_file_offset": 5780624,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 71992,
+        "kernel": "conv7",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 12,
+        "fatbin_file_offset": 5780624,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 64672,
+        "kernel": "conv7",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 13,
+        "fatbin_file_offset": 5917504,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 71992,
+        "kernel": "conv8",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 13,
+        "fatbin_file_offset": 5917504,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 64672,
+        "kernel": "conv8",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 14,
+        "fatbin_file_offset": 6054384,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 152320,
+        "kernel": "conv_fused",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 14,
+        "fatbin_file_offset": 6054384,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 55712,
+        "kernel": "conv_fused",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 15,
+        "fatbin_file_offset": 6262624,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 46528,
+        "kernel": "conv_proj1",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 15,
+        "fatbin_file_offset": 6262624,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 35936,
+        "kernel": "conv_proj1",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 16,
+        "fatbin_file_offset": 6345296,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 171160,
+        "kernel": "conv_proj2",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 16,
+        "fatbin_file_offset": 6345296,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 105632,
+        "kernel": "conv_proj2",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 17,
+        "fatbin_file_offset": 6622304,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 17600,
+        "kernel": "conv_out1",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 17,
+        "fatbin_file_offset": 6622304,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 11104,
+        "kernel": "conv_out1",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 18,
+        "fatbin_file_offset": 6651216,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 22512,
+        "kernel": "conv_out2",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 18,
+        "fatbin_file_offset": 6651216,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 14048,
+        "kernel": "conv_out2",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 19,
+        "fatbin_file_offset": 6687984,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 18640,
+        "kernel": "conv_out3",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 19,
+        "fatbin_file_offset": 6687984,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 11872,
+        "kernel": "conv_out3",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 20,
+        "fatbin_file_offset": 6718704,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 11096,
+        "kernel": "depth_to_space_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 20,
+        "fatbin_file_offset": 6718704,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 8800,
+        "kernel": "depth_to_space_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 21,
+        "fatbin_file_offset": 6738816,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 153096,
+        "kernel": "attn1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 21,
+        "fatbin_file_offset": 6738816,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 102816,
+        "kernel": "attn1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 22,
+        "fatbin_file_offset": 6994944,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 107008,
+        "kernel": "attn2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 22,
+        "fatbin_file_offset": 6994944,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 66272,
+        "kernel": "attn2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 23,
+        "fatbin_file_offset": 7168432,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 23992,
+        "kernel": "conv1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 23,
+        "fatbin_file_offset": 7168432,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 18528,
+        "kernel": "conv1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 24,
+        "fatbin_file_offset": 7211168,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 25632,
+        "kernel": "conv2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 24,
+        "fatbin_file_offset": 7211168,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 20704,
+        "kernel": "conv2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 25,
+        "fatbin_file_offset": 7257712,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 14112,
+        "kernel": "conv3_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 25,
+        "fatbin_file_offset": 7257712,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 10144,
+        "kernel": "conv3_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 26,
+        "fatbin_file_offset": 7282176,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 30800,
+        "kernel": "conv4_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 26,
+        "fatbin_file_offset": 7282176,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 22752,
+        "kernel": "conv4_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 27,
+        "fatbin_file_offset": 7335936,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 30800,
+        "kernel": "conv5_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 27,
+        "fatbin_file_offset": 7335936,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 22752,
+        "kernel": "conv5_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 28,
+        "fatbin_file_offset": 7389696,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 35136,
+        "kernel": "conv6_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 28,
+        "fatbin_file_offset": 7389696,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 34976,
+        "kernel": "conv6_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 29,
+        "fatbin_file_offset": 7460016,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 61464,
+        "kernel": "conv7_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 29,
+        "fatbin_file_offset": 7460016,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 42976,
+        "kernel": "conv7_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 30,
+        "fatbin_file_offset": 7564672,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 61464,
+        "kernel": "conv8_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 30,
+        "fatbin_file_offset": 7564672,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 42976,
+        "kernel": "conv8_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 31,
+        "fatbin_file_offset": 7669328,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 123880,
+        "kernel": "conv_fused_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 31,
+        "fatbin_file_offset": 7669328,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 49952,
+        "kernel": "conv_fused_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 32,
+        "fatbin_file_offset": 7843376,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 48056,
+        "kernel": "conv_proj1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 32,
+        "fatbin_file_offset": 7843376,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 38496,
+        "kernel": "conv_proj1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 33,
+        "fatbin_file_offset": 7930144,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 161200,
+        "kernel": "conv_proj2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 33,
+        "fatbin_file_offset": 7930144,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 98720,
+        "kernel": "conv_proj2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 34,
+        "fatbin_file_offset": 8190272,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 18504,
+        "kernel": "conv_out1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 34,
+        "fatbin_file_offset": 8190272,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 11872,
+        "kernel": "conv_out1_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 35,
+        "fatbin_file_offset": 8220864,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 24040,
+        "kernel": "conv_out2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 35,
+        "fatbin_file_offset": 8220864,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 15328,
+        "kernel": "conv_out2_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 36,
+        "fatbin_file_offset": 8260448,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 19864,
+        "kernel": "conv_out3_fp8",
+        "fp8": true,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 36,
+        "fatbin_file_offset": 8260448,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 13152,
+        "kernel": "conv_out3_fp8",
+        "fp8": true,
+        "elf_flags": "0x06005904"
+      },
+      {
+        "fatbin_index": 37,
+        "fatbin_file_offset": 8293680,
+        "entry_index": 1,
+        "architecture": 120,
+        "size": 8184,
+        "kernel": "main_kernel",
+        "fp8": false,
+        "elf_flags": "0x06007802"
+      },
+      {
+        "fatbin_index": 37,
+        "fatbin_file_offset": 8293680,
+        "entry_index": 2,
+        "architecture": 89,
+        "size": 5032,
+        "kernel": "main_kernel",
+        "fp8": false,
+        "elf_flags": "0x06005904"
+      }
+    ]
+  }
+}

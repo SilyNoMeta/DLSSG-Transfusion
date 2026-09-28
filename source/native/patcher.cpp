@@ -12,6 +12,7 @@
 #include "pacing_policy.h"
 #include "multiplier_overlay.h"
 #include "gpu_arch.h"
+#include "smooth_motion_sm86.h"
 #include "hud_assist.h"
 #include "adaptive_policy.h"
 #include "addon_api.h"
@@ -283,6 +284,8 @@ void MidpointLog(const wchar_t* message)
 std::atomic<bool> gConfigForceOta{false};
 std::atomic<bool> gConfigPatchFlipMetering{false};
 std::atomic<bool> gConfigBlackwellTransfusion{true};
+std::atomic<bool> gConfigSmoothMotionSm86{false};
+std::atomic<smooth_motion_sm86::ApiMode> gConfigSmoothMotionSm86Api{smooth_motion_sm86::ApiMode::D3D12};
 std::atomic<bool> gConfigQualityFix{true};
 std::atomic<bool> gConfigQualityPolicyExplainedWarp{true};
 // HUD-less capture and UI layer synthesis (Preset B for games that do not tag them).
@@ -1123,6 +1126,31 @@ bool TryParseGpuArchitecture(const std::string& content, gpu_arch::Family& famil
         && gpu_arch::TryParse(content.data() + offset + 1, end - offset - 1, family);
 }
 
+bool TryParseSmoothMotionApi(const std::string& content, smooth_motion_sm86::ApiMode& mode)
+{
+    size_t offset = 0;
+    if (!FindJsonValue(content, "smoothMotionSm86Api", offset)) return false;
+    if (content.compare(offset, 7, "\"d3d12\"") == 0)
+        mode = smooth_motion_sm86::ApiMode::D3D12;
+    else if (content.compare(offset, 7, "\"d3d11\"") == 0)
+        mode = smooth_motion_sm86::ApiMode::D3D11;
+    else if (content.compare(offset, 8, "\"vulkan\"") == 0)
+        mode = smooth_motion_sm86::ApiMode::Vulkan;
+    else
+        return false;
+    return true;
+}
+
+const char* SmoothMotionApiName(smooth_motion_sm86::ApiMode mode)
+{
+    switch (mode)
+    {
+    case smooth_motion_sm86::ApiMode::D3D11: return "d3d11";
+    case smooth_motion_sm86::ApiMode::Vulkan: return "vulkan";
+    default: return "d3d12";
+    }
+}
+
 bool TryParseUnsigned(const std::string& content, const char* name,
     uint32_t minimum, uint32_t maximum, uint32_t& value)
 {
@@ -1262,6 +1290,10 @@ std::string BuildControlJson(const ControlConfig& control)
                 "D3D12: capture the HUD-less scene and build the UI layer when the game does not tag them."},
         }},
         {"compatibility", {
+            {"smoothMotionSm86", boolean(gConfigSmoothMotionSm86.load(relaxed)),
+                "Experimental driver Smooth Motion for RTX 30 on the inspected NVIDIA 617.14 build. Restart the game to apply."},
+            {"smoothMotionSm86Api", text(SmoothMotionApiName(gConfigSmoothMotionSm86Api.load(relaxed))),
+                "Match the active graphics API (Direct3D 12/11 or Vulkan), not the engine. Find the game's API section via https://www.pcgamingwiki.com/ and restart the game."},
             {"disableMenuDetection", boolean(gConfigDisableMenuDetection.load(relaxed)),
                 "Keep frame generation running in menus and loading screens. Leave false: idling at 1x there avoids device-hang crashes."},
             {"forceOTA", boolean(gConfigForceOta.load(relaxed)),
@@ -1539,6 +1571,17 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
     if (TryParseGpuArchitecture(content, gpuArchitecture))
         gConfigGpuArchitecture.store(gpuArchitecture, std::memory_order_relaxed);
     else if (missingKeys) missingKeys->push_back("gpuArchitecture");
+
+    size_t smoothMotionOffset = 0;
+    bool smoothMotion = gConfigSmoothMotionSm86.load(std::memory_order_relaxed);
+    if (FindJsonValue(content, "smoothMotionSm86", smoothMotionOffset)
+        && TryParseBoolean(content, "smoothMotionSm86", smoothMotion))
+        gConfigSmoothMotionSm86.store(smoothMotion, std::memory_order_relaxed);
+    else if (missingKeys) missingKeys->push_back("smoothMotionSm86");
+    auto smoothMotionApi = gConfigSmoothMotionSm86Api.load(std::memory_order_relaxed);
+    if (TryParseSmoothMotionApi(content, smoothMotionApi))
+        gConfigSmoothMotionSm86Api.store(smoothMotionApi, std::memory_order_relaxed);
+    else if (missingKeys) missingKeys->push_back("smoothMotionSm86Api");
 
     const std::pair<const char*, std::atomic<bool>*> overlayLines[] = {
         {"overlayShowUiRecomposition", &gConfigOverlayShowUir},
@@ -4989,7 +5032,7 @@ void OnPotentialModuleLoaded(HMODULE module, LPCWSTR name);
 
 // The DLSS Super Resolution hooks must be in place before the game's first
 // optimal-settings query, which follows the NGX core load immediately.
-void OnLibraryLoaded(HMODULE module, LPCWSTR path)
+void OnLibraryLoaded(HMODULE module, LPCWSTR path, bool firstNvoglvLoad)
 {
     if (!module || !path || reinterpret_cast<uintptr_t>(path) < 0x10000)
         return;
@@ -4998,6 +5041,14 @@ void OnLibraryLoaded(HMODULE module, LPCWSTR path)
         if (*p == L'\\' || *p == L'/') name = p + 1;
     if (_wcsicmp(name, L"_nvngx.dll") == 0 || _wcsicmp(name, L"nvngx.dll") == 0)
         dlss_sr::TryInstall();
+    if (firstNvoglvLoad && _wcsicmp(name, L"nvoglv64.dll") == 0
+        && gConfigSmoothMotionSm86.load(std::memory_order_relaxed)
+        && gConfigSmoothMotionSm86Api.load(std::memory_order_relaxed)
+            == smooth_motion_sm86::ApiMode::Vulkan)
+    {
+        if (!smooth_motion_sm86::TryForceVulkanProfileGate(module))
+            Log(L"[SM86] Vulkan profile gate bypass unavailable; leaving NVIDIA code unchanged");
+    }
 }
 
 HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
@@ -5005,6 +5056,11 @@ HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
     const DWORD incomingError = GetLastError();
     const bool trace = lpLibFileName && reinterpret_cast<uintptr_t>(lpLibFileName) >= 0x10000
         && IsTargetModule(lpLibFileName, lpLibFileName);
+    const bool nvoglvRequested = lpLibFileName
+        && reinterpret_cast<uintptr_t>(lpLibFileName) >= 0x10000
+        && ContainsCI(lpLibFileName, L"nvoglv64.dll");
+    const bool nvoglvWasLoaded = nvoglvRequested
+        && GetModuleHandleW(L"nvoglv64.dll") != nullptr;
     if (trace) Log(L"[LOAD] LoadLibraryW ENTER: %s", lpLibFileName);
     SetLastError(incomingError);
     HMODULE mod = gRealLoadLibraryW(lpLibFileName);
@@ -5027,7 +5083,7 @@ HMODULE WINAPI HookLoadLibraryW(LPCWSTR lpLibFileName)
         }
     }
     if (trace) Log(L"[LOAD] LoadLibraryW inspection complete: base=%p", mod);
-    OnLibraryLoaded(mod, lpLibFileName);
+    OnLibraryLoaded(mod, lpLibFileName, nvoglvRequested && !nvoglvWasLoaded);
     SetLastError(loadError);
     return mod;
 }
@@ -5037,6 +5093,11 @@ HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwF
     const DWORD incomingError = GetLastError();
     const bool trace = lpLibFileName && reinterpret_cast<uintptr_t>(lpLibFileName) >= 0x10000
         && IsTargetModule(lpLibFileName, lpLibFileName);
+    const bool nvoglvRequested = lpLibFileName
+        && reinterpret_cast<uintptr_t>(lpLibFileName) >= 0x10000
+        && ContainsCI(lpLibFileName, L"nvoglv64.dll");
+    const bool nvoglvWasLoaded = nvoglvRequested
+        && GetModuleHandleW(L"nvoglv64.dll") != nullptr;
     if (trace) Log(L"[LOAD] LoadLibraryExW ENTER: flags=0x%lX path=%s", dwFlags, lpLibFileName);
     SetLastError(incomingError);
     HMODULE mod = gRealLoadLibraryExW(lpLibFileName, hFile, dwFlags);
@@ -5061,7 +5122,7 @@ HMODULE WINAPI HookLoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwF
     }
     if (trace) Log(L"[LOAD] LoadLibraryExW inspection complete: base=%p", mod);
     if ((dwFlags & kDataOnly) == 0)
-        OnLibraryLoaded(mod, lpLibFileName);
+        OnLibraryLoaded(mod, lpLibFileName, nvoglvRequested && !nvoglvWasLoaded);
     SetLastError(loadError);
     return mod;
 }
@@ -5751,6 +5812,59 @@ bool ProcessStandaloneHotkeys(ControlConfig& control, bool& controlChanged)
     return true;
 }
 
+// Diagnostic only: observe the NVIDIA Vulkan layer's own call, preserving its
+// driver-supplied arguments. smooth_motion_sm86::Initialize has already
+// validated the exact NvPresent build before this detour is installed.
+using NvpInitVulkan = bool (WINAPI*)(void*, void*, void*);
+NvpInitVulkan gOriginalNvpInitVulkan = nullptr;
+std::atomic<unsigned> gNvpInitVulkanCalls{0};
+
+bool WINAPI HookNvpInitVulkan(void* first, void* second, void* third)
+{
+    const unsigned call = gNvpInitVulkanCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (call <= 4) Log(L"[SM86] NVP_Init_Vulkan call #%u observed", call);
+    const bool result = gOriginalNvpInitVulkan(first, second, third);
+    if (call <= 4) Log(L"[SM86] NVP_Init_Vulkan call #%u returned %d", call, result ? 1 : 0);
+    return result;
+}
+
+void InstallNvpVulkanTrace()
+{
+    HMODULE module = GetModuleHandleW(L"NvPresent64.dll");
+    if (!module)
+    {
+        Log(L"[SM86] Vulkan init trace unavailable: NvPresent is not loaded");
+        return;
+    }
+    auto* target = GetProcAddress(module, "NVP_Init_Vulkan");
+    if (target != reinterpret_cast<FARPROC>(reinterpret_cast<uint8_t*>(module) + 0x5a50))
+    {
+        Log(L"[SM86] Vulkan init trace refused: unexpected export address");
+        return;
+    }
+    gOriginalNvpInitVulkan = reinterpret_cast<NvpInitVulkan>(target);
+    LONG status = DetourTransactionBegin();
+    if (status == NO_ERROR) status = DetourUpdateThread(GetCurrentThread());
+    if (status == NO_ERROR)
+        status = DetourAttach(reinterpret_cast<void**>(&gOriginalNvpInitVulkan),
+            reinterpret_cast<void*>(&HookNvpInitVulkan));
+    if (status != NO_ERROR)
+    {
+        DetourTransactionAbort();
+        gOriginalNvpInitVulkan = nullptr;
+        Log(L"[SM86] Vulkan init trace installation failed: %ld", status);
+        return;
+    }
+    status = DetourTransactionCommit();
+    if (status != NO_ERROR)
+    {
+        gOriginalNvpInitVulkan = nullptr;
+        Log(L"[SM86] Vulkan init trace commit failed: %ld", status);
+        return;
+    }
+    Log(L"[SM86] Vulkan init trace installed (observation only)");
+}
+
 DWORD WINAPI PatchWorker(void* context)
 {
     const DWORD pid = GetCurrentProcessId();
@@ -5768,6 +5882,21 @@ DWORD WINAPI PatchWorker(void* context)
         }
     }
     gLogReady.store(gLog != nullptr, std::memory_order_release);
+
+    // The setting is read once at process attach. Install before the overlay
+    // initializes DXGI so NvPresent can observe D3D12 factory creation.
+    if (gConfigSmoothMotionSm86.load(std::memory_order_relaxed))
+    {
+        if (gpu_arch::Target() == gpu_arch::Family::Ampere)
+        {
+            const auto api = gConfigSmoothMotionSm86Api.load(std::memory_order_relaxed);
+            if (smooth_motion_sm86::Initialize([](const wchar_t* message) { Log(L"%s", message); }, api)
+                && api == smooth_motion_sm86::ApiMode::Vulkan)
+                InstallNvpVulkanTrace();
+        }
+        else
+            Log(L"[SM86] Requested, but the detected GPU is not Ampere; refusing activation");
+    }
 
     // DXGI and D3D12 initialization may load modules and install detours. Doing
     // that work from DLL_PROCESS_ATTACH holds the Windows loader lock and can
@@ -6024,9 +6153,20 @@ void InitializeGpuArchitecture(HINSTANCE instance)
         std::array<char, 16384> buffer{};
         DWORD bytesRead = 0;
         gpu_arch::Family configured = gpu_arch::Family::Unknown;
-        if (ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &bytesRead, nullptr)
-            && TryParseGpuArchitecture(std::string(buffer.data(), bytesRead), configured))
-            gConfigGpuArchitecture.store(configured, std::memory_order_relaxed);
+        if (ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &bytesRead, nullptr))
+        {
+            const std::string content(buffer.data(), bytesRead);
+            if (TryParseGpuArchitecture(content, configured))
+                gConfigGpuArchitecture.store(configured, std::memory_order_relaxed);
+            size_t offset = 0;
+            bool smoothMotion = false;
+            if (FindJsonValue(content, "smoothMotionSm86", offset)
+                && TryParseBoolean(content, "smoothMotionSm86", smoothMotion))
+                gConfigSmoothMotionSm86.store(smoothMotion, std::memory_order_relaxed);
+            auto smoothMotionApi = smooth_motion_sm86::ApiMode::D3D12;
+            if (TryParseSmoothMotionApi(content, smoothMotionApi))
+                gConfigSmoothMotionSm86Api.store(smoothMotionApi, std::memory_order_relaxed);
+        }
         CloseHandle(file);
     }
 

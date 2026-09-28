@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 project(DLSSGTransfusionNative LANGUAGES C CXX ASM_MASM RC)
 
 # Release identity: DLL version resources and the first log lines.
-set(TRANSFUSION_VERSION "1.4.5.0-rtx20-30-40")
-set(TRANSFUSION_VERSION_NUMERIC "1,4,5,0")
+set(TRANSFUSION_VERSION "1.4.5.1-rtx20-30-40")
+set(TRANSFUSION_VERSION_NUMERIC "1,4,5,1")
 set(TRANSFUSION_COMPANY "SilyNoMeta")
 set(TRANSFUSION_DESCRIPTION "DLSSG-Transfusion for RTX 20, 30 and 40")
 
@@ -53,7 +53,36 @@ set(COMMON_SOURCES
     proxy_thunks.asm
     vulkan_nvx_thunks.asm
     gpu_arch.cpp
+    smooth_motion_sm86.cpp
 )
+
+add_executable(smooth_motion_fatbin_test "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/smooth_motion_fatbin_test.cpp")
+target_compile_features(smooth_motion_fatbin_test PRIVATE cxx_std_20)
+target_include_directories(smooth_motion_fatbin_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_executable(smooth_motion_sm86_probe "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/smooth_motion_sm86_probe.cpp"
+    smooth_motion_sm86.cpp)
+target_compile_features(smooth_motion_sm86_probe PRIVATE cxx_std_20)
+target_link_libraries(smooth_motion_sm86_probe PRIVATE bcrypt)
+
+add_executable(smooth_motion_vulkan_gate_probe
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/smooth_motion_vulkan_gate_probe.cpp"
+    smooth_motion_sm86.cpp)
+target_compile_features(smooth_motion_vulkan_gate_probe PRIVATE cxx_std_20)
+target_include_directories(smooth_motion_vulkan_gate_probe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(smooth_motion_vulkan_gate_probe PRIVATE bcrypt)
+
+# Read-only Vulkan profile diagnostic. Point this at the official NVIDIA
+# nvapi SDK headers; no NVAPI import library is needed (runtime resolution).
+set(NVAPI_INCLUDE_DIR "" CACHE PATH "Optional: directory containing NVIDIA nvapi.h")
+if(NVAPI_INCLUDE_DIR)
+    if(NOT EXISTS "${NVAPI_INCLUDE_DIR}/nvapi.h")
+        message(FATAL_ERROR "NVAPI_INCLUDE_DIR must contain nvapi.h")
+    endif()
+    add_executable(smooth_motion_drs_probe "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/smooth_motion_drs_probe.cpp")
+    target_compile_features(smooth_motion_drs_probe PRIVATE cxx_std_20)
+    target_include_directories(smooth_motion_drs_probe PRIVATE "${NVAPI_INCLUDE_DIR}")
+endif()
 
 # DL1/DL2 network kernels: not part of the public source tree
 # (docs/PUBLIC-SOURCE.md). Without them the provider's network runs unchanged.
