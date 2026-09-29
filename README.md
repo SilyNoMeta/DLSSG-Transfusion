@@ -15,7 +15,7 @@ and experimental NVIDIA driver Smooth Motion — delivered as one universal prox
 [![Graphics APIs](https://img.shields.io/badge/APIs-DX11%20%7C%20DX12%20%7C%20Vulkan-0078d4?style=flat-square&logo=windows11&logoColor=white)](#gpu--api-status)
 [![Research mod](https://img.shields.io/badge/Status-Experimental-f59e0b?style=flat-square)](#gpu--api-status)
 
-[![Download v1.4.5.2](https://img.shields.io/badge/Download-v1.4.5.2--rtx20--30--40-76b900?style=for-the-badge&logo=github)](https://github.com/SilyNoMeta/DLSSG-Transfusion/releases/download/v1.4.5.2-rtx20-30-40/DLSSG-Transfusion-v1.4.5.2-rtx20-30-40.zip)
+[![Download v1.4.5.3](https://img.shields.io/badge/Download-v1.4.5.3--rtx20--30--40-76b900?style=for-the-badge&logo=github)](https://github.com/SilyNoMeta/DLSSG-Transfusion/releases/download/v1.4.5.3-rtx20-30-40/DLSSG-Transfusion-v1.4.5.3-rtx20-30-40.zip)
 [![Installation guide](https://img.shields.io/badge/Installation-Guide-2f81f7?style=for-the-badge&logo=readthedocs&logoColor=white)](INJECTION.md)
 [![Changelog](https://img.shields.io/badge/Release-Changelog-f59e0b?style=for-the-badge)](CHANGELOG.md)
 
@@ -37,7 +37,7 @@ Tony's NVIDIA runtime patches remain the engine; this fork extends them to older
 | **Graphics APIs** | DLSS FG: DirectX 12 / Vulkan · Smooth Motion: DirectX 11 / 12 / Vulkan |
 | **Proxy names** | `version.dll` · `dinput8.dll` · `dxgi.dll` · `winmm.dll` · any `.asi` name |
 | **Configuration** | Readable JSON · remappable shortcuts · optional ReShade 6.8+ panel |
-| **Current release** | [`v1.4.5.2-rtx20-30-40`](https://github.com/SilyNoMeta/DLSSG-Transfusion/releases/tag/v1.4.5.2-rtx20-30-40) |
+| **Current release** | [`v1.4.5.3-rtx20-30-40`](https://github.com/SilyNoMeta/DLSSG-Transfusion/releases/tag/v1.4.5.3-rtx20-30-40) |
 
 ## Quick install
 
@@ -51,13 +51,15 @@ For proxy selection, ReShade, Vulkan runtimes, game-specific notes and troublesh
 > [!TIP]
 > Start with the supplied defaults: `"mode": "game"` lets the game or NVIDIA Profile Inspector choose the multiplier. Dynamic Mode stays at X4 or below unless experimental X5/X6 is explicitly allowed. On 8 GB GPUs, X2–X3 — or X4 with High/Medium textures — is the safer starting point.
 
-## What's new in `v1.4.5.2-rtx20-30-40`
+## What's new in `v1.4.5.3-rtx20-30-40`
 
-This hotfix corrects the D3D12 UI-assist path that crashed the originally reported Starfield save. It retains every `v1.4.5.1` feature, including experimental Smooth Motion on RTX 30. See the [full changelog](CHANGELOG.md) and [dedicated v1.4.5.2 notes](docs/RELEASE-1.4.5.2-rtx20-30-40.md).
+This release redesigns the optional ReShade settings panel. The engine is unchanged from `v1.4.5.2`; only `DLSSG-Transfusion.addon64` differs. It retains every earlier feature, including the Starfield UI-assist hotfix and experimental Smooth Motion on RTX 30. See the [full changelog](CHANGELOG.md) and [dedicated v1.4.5.3 notes](docs/RELEASE-1.4.5.3-rtx20-30-40.md).
 
 | | Highlight | What changed |
 | :---: | :--- | :--- |
-| 🩹 | **Starfield UI-assist hotfix** | The complete Streamline tag batch is inspected before making a HUD-less copy, avoiding the redundant D3D12 transition that crashed the reported save. A separate Cyberpunk 2077 regression test also passed. |
+| 🎛️ | **Redesigned ReShade panel** | Themed layout with toggle switches, sliders, segmented buttons, a status card, collapsible sections, reset buttons (per setting and per section) and restart badges. Defaults match the engine's. |
+| 🌀 | **Smooth Motion switch** | The RTX 30 Smooth Motion switch and its graphics-API choice are now in the panel under Compatibility; the driver limits are unchanged. |
+| 🩹 | **Starfield UI-assist hotfix** (`v1.4.5.2`) | The complete Streamline tag batch is inspected before making a HUD-less copy, avoiding the redundant D3D12 transition that crashed the reported save. A separate Cyberpunk 2077 regression test also passed. |
 | 🌀 | **Smooth Motion on RTX 30** | Opt-in FP16 driver path for D3D11, D3D12 and Vulkan, strictly gated to the inspected NVIDIA 617.14 binaries. Unknown builds, FP8 and RTX 20 are refused. |
 | 🟢 | **RTX 30 support** | Architecture gates follow the detected GPU and Blackwell kernels are retargeted to `sm_86`. |
 | 🧪 | **RTX 20 support** | Ampere-only instructions are rewritten for `sm_75`. This path has only been validated through RTX 30 emulation and requires DLSS-G 310.9.x. |
@@ -94,7 +96,7 @@ Test coverage for this release includes Cyberpunk 2077 (RTX 3070 Ti Laptop, DX12
 
 ## Experimental Smooth Motion on RTX 30
 
-Release `v1.4.5.1` introduced an opt-in SM86 FP16 path for NVIDIA driver Smooth Motion; it remains included unchanged in `v1.4.5.2`. Enable it in the `compatibility` section and select the API the game is actually using:
+Release `v1.4.5.1` introduced an opt-in SM86 FP16 path for NVIDIA driver Smooth Motion; it remains included unchanged in `v1.4.5.3`. Enable it in the `compatibility` section and select the API the game is actually using:
 
 ```jsonc
 "smoothMotionSm86": true,
@@ -216,7 +218,7 @@ Version 1.4.1 consolidated the proxy routes into one universal DLL, added the mu
 | Guide | English | Français |
 | :--- | :---: | :---: |
 | Installation, configuration & troubleshooting | [Open](INJECTION.md) | — |
-| Current release — `v1.4.5.2` | [Open](docs/RELEASE-1.4.5.2-rtx20-30-40.md) | [Ouvrir](docs/RELEASE-1.4.5.2-rtx20-30-40.md#français) |
+| Current release — `v1.4.5.3` | [Open](docs/RELEASE-1.4.5.3-rtx20-30-40.md) | [Ouvrir](docs/RELEASE-1.4.5.3-rtx20-30-40.md#français) |
 | Complete changelog | [Open](CHANGELOG.md) | [Ouvrir](CHANGELOG.md#français) |
 | Smooth Motion on RTX 30 | [Open](docs/SMOOTH-MOTION-SM86.md) | [Ouvrir](docs/SMOOTH-MOTION-SM86.fr.md) |
 | RTX 30 / `sm_86` architecture | [Open](docs/RTX30-SM86.md) | [Ouvrir](docs/RTX30-SM86.fr.md) |

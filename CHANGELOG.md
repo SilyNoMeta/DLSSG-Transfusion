@@ -1,4 +1,22 @@
-# DLSSG-Transfusion v1.4.5.2-rtx20-30-40
+# DLSSG-Transfusion v1.4.5.3-rtx20-30-40
+
+## v1.4.5.3-rtx20-30-40 — redesigned ReShade panel
+
+- The ReShade **DLSSG-Transfusion** tab has a new look: dark themed panel,
+  toggle switches, sliders with a value column, segmented buttons for short
+  choices, a status card for the engine state, and collapsible sections.
+- Each setting that differs from its default shows a reset button, and each
+  section has **Reset section**. The panel now uses the engine's real defaults
+  (previously it assumed `uiAssist` was off; it is on by default).
+- Settings that are read at game start show a restart badge on their label,
+  and a card counts the pending changes.
+- New **Compatibility > Smooth Motion (RTX 30, experimental)** switch and
+  graphics-API choice (`smoothMotionSm86`, `smoothMotionSm86Api`), with the
+  same driver limits as before: NVIDIA 617.14 only, restart required.
+- The **Disable keyboard shortcuts** switch is no longer in the panel. The
+  `disableKeybinds` JSON key still works exactly as before.
+- No engine, kernel or Smooth Motion change: only the optional add-on
+  (`DLSSG-Transfusion.addon64`) differs from v1.4.5.2.
 
 ## v1.4.5.2-rtx20-30-40 — Starfield UI assist hotfix
 

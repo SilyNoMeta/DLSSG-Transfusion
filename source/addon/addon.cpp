@@ -11,7 +11,9 @@
 #include <psapi.h>
 
 #include <cstdio>
+#include <cstdarg>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 #include <deps/imgui/imgui.h>
@@ -86,7 +88,7 @@ struct RestartValue
 std::vector<RestartValue> gRestartValues = {
     {"forceOTA", {}}, {"patchFlipMetering", {}}, {"blackwellTransfusion", {}},
     {"qualityValidWarp", {}}, {"qualityPolicy", {}}, {"optimizedKernels", {}},
-    {"gpuArchitecture", {}},
+    {"gpuArchitecture", {}}, {"smoothMotionSm86", {}}, {"smoothMotionSm86Api", {}},
 };
 bool gRestartSnapshotTaken = false;
 
@@ -251,50 +253,517 @@ int PendingRestartCount()
 }
 
 // ---------------------------------------------------------------------------
-// Widgets
+// Widgets and panel style
 
-const ImVec4 kGood(0.45f, 0.85f, 0.62f, 1.0f);
-const ImVec4 kWarning(0.95f, 0.76f, 0.40f, 1.0f);
+const ImVec4 kGood(0.4627f, 0.7255f, 0.0f, 1.0f);      // #76B900
+const ImVec4 kWarning(0.9608f, 0.6510f, 0.1373f, 1.0f); // #F5A623
+const ImVec4 kBad(0.9216f, 0.3412f, 0.3412f, 1.0f);     // #EB5757
+const ImVec4 kIdle(0.4314f, 0.4627f, 0.5059f, 1.0f);    // #6E7681
 
-void Section(const char* name)
+namespace ui
 {
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::SeparatorText(name);
+ImVec4 Hex(unsigned rgb, float alpha = 1.0f)
+{
+    return ImVec4(((rgb >> 16) & 0xff) / 255.0f, ((rgb >> 8) & 0xff) / 255.0f, (rgb & 0xff) / 255.0f, alpha);
 }
 
-void Help(const char* text)
+const ImVec4 kBgWindow = Hex(0x14161A, 0.94f);
+const ImVec4 kBgCard = Hex(0x1D2026);
+const ImVec4 kBgControl = Hex(0x262A31);
+const ImVec4 kBgControlHover = Hex(0x2F343C);
+const ImVec4 kStroke = Hex(0x2A2E36);
+const ImVec4 kTextPrimary = Hex(0xE8EAED);
+const ImVec4 kTextSecondary = Hex(0x9AA0A8);
+const ImVec4 kAccent = Hex(0xA174DC);        // "Iris"
+const ImVec4 kAccentHover = Hex(0xB28DE2);
+const ImVec4 kAccentActive = Hex(0x8043D0);
+const ImVec4 kClear = ImVec4(0, 0, 0, 0);
+
+constexpr float kLabelEm = 22.0f, kLabelShare = 0.5f, kStackEm = 24.0f, kValueEm = 3.5f, kTooltipEm = 35.0f;
+constexpr float kSectionGap = 16.0f;
+constexpr const char* kRestartGlyph = "\xef\x80\xa1";  // ForkAwesome glyphs, merged by ReShade
+constexpr const char* kResetGlyph = "\xef\x83\xa2";
+
+// The only place the panel style is pushed. Constructed first in DrawPanel, so
+// the destructor pops on every exit path and nothing leaks into ReShade's other
+// tabs or add-ons. The dark background is a full-window child: ReShade has
+// already opened its own window when the callback runs.
+class PanelScope
 {
-    ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
+public:
+    PanelScope()
+    {
+        Color(ImGuiCol_Text, kTextPrimary);
+        Color(ImGuiCol_TextDisabled, kTextSecondary);
+        Color(ImGuiCol_ChildBg, kBgWindow);
+        Color(ImGuiCol_Border, kStroke);
+        Color(ImGuiCol_Separator, kStroke);
+        Color(ImGuiCol_FrameBg, kBgControl);
+        Color(ImGuiCol_FrameBgHovered, kBgControlHover);
+        Color(ImGuiCol_FrameBgActive, kBgControlHover);
+        Color(ImGuiCol_Button, kBgControl);
+        Color(ImGuiCol_ButtonHovered, kBgControlHover);
+        Color(ImGuiCol_ButtonActive, kAccentActive);
+        Color(ImGuiCol_Header, kBgCard);
+        Color(ImGuiCol_HeaderHovered, kBgControlHover);
+        Color(ImGuiCol_HeaderActive, kBgControlHover);
+        Color(ImGuiCol_SliderGrab, kAccent);
+        Color(ImGuiCol_SliderGrabActive, kAccentHover);
+        Color(ImGuiCol_CheckMark, kAccent);
+        Color(ImGuiCol_PopupBg, kBgCard);
+        Color(ImGuiCol_TextLink, kAccent);
+        Var(ImGuiStyleVar_FrameRounding, 6.0f);
+        Var(ImGuiStyleVar_GrabRounding, 4.0f);
+        Var(ImGuiStyleVar_ChildRounding, 8.0f);
+        Var(ImGuiStyleVar_PopupRounding, 6.0f);
+        Var(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 8.0f));
+        Var(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
+        Var(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
+        ImGui::BeginChild("##DLSSG-Transfusion panel", ImVec2(0, 0), ImGuiChildFlags_AlwaysUseWindowPadding);
+    }
+    ~PanelScope()
+    {
+        ImGui::EndChild();
+        ImGui::PopStyleVar(vars_);
+        ImGui::PopStyleColor(colors_);
+    }
+    PanelScope(const PanelScope&) = delete;
+    PanelScope& operator=(const PanelScope&) = delete;
+
+private:
+    void Color(ImGuiCol index, const ImVec4& color) { ImGui::PushStyleColor(index, color); ++colors_; }
+    void Var(ImGuiStyleVar index, float value) { ImGui::PushStyleVar(index, value); ++vars_; }
+    void Var(ImGuiStyleVar index, const ImVec2& value) { ImGui::PushStyleVar(index, value); ++vars_; }
+    int colors_ = 0, vars_ = 0;
+};
+
+void Tooltip(const char* text)
+{
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * kTooltipEm);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
+// Longest prefix of `text` (cut on a UTF-8 boundary) that fits `width` with "...".
+std::string Ellipsize(const char* text, float width, bool* truncated)
+{
+    *truncated = false;
+    if (ImGui::CalcTextSize(text).x <= width)
+        return text;
+    *truncated = true;
+    std::string full = text;
+    size_t length = full.size();
+    while (length > 0)
+    {
+        --length;
+        while (length > 0 && (static_cast<unsigned char>(full[length]) & 0xC0) == 0x80)
+            --length;
+        const std::string candidate = full.substr(0, length) + "...";
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= width)
+            return candidate;
+    }
+    return "...";
+}
+
+struct Row
+{
+    float controlWidth;
+    float resetX;     // window-local x of the reset slot, always reserved at the row end
+    bool labelClicked;
+};
+
+// Label column (12 em, at most 42% of the width, stacked above the control
+// under 24 em), then the cursor is left where the control goes. The label is
+// the click target of switches and carries the help tooltip; a pending-restart
+// setting gets a badge at the end of the column.
+Row RowLabel(const char* label, const char* help, bool restartPending)
+{
+    const float em = ImGui::GetFontSize();
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float frameHeight = ImGui::GetFrameHeight();
+    const float x0 = ImGui::GetCursorPosX();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const bool stacked = avail < kStackEm * em;
+    const float labelWidth = stacked ? avail : (kLabelEm * em < kLabelShare * avail ? kLabelEm * em : kLabelShare * avail);
+    const float badgeWidth = restartPending ? 1.6f * em : 0.0f;
+
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    bool truncated = false;
+    const std::string shown = Ellipsize(label, labelWidth - badgeWidth, &truncated);
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushStyleColor(ImGuiCol_Text, kTextSecondary);
+    ImGui::TextUnformatted(shown.c_str());
+    ImGui::PopStyleColor();
+
+    const ImVec2 corner(origin.x + labelWidth, origin.y + frameHeight);
+    if (restartPending)
+    {
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddText(ImVec2(corner.x - 1.3f * em, origin.y + ImGui::GetStyle().FramePadding.y),
+            ImGui::GetColorU32(kWarning), kRestartGlyph);
+    }
+
+    Row row{};
+    row.resetX = x0 + avail - frameHeight;
+    const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(origin, corner);
+    row.labelClicked = hovered && ImGui::IsMouseClicked(0);
+    if (hovered && (help || truncated || restartPending))
+    {
+        std::string text;
+        if (truncated)
+            text = std::string(label) + "\n\n";
+        if (help)
+            text += help;
+        if (restartPending)
+            text += std::string(help ? "\n\n" : "") + "Restart the game to apply.";
+        Tooltip(text.c_str());
+    }
+
+    const float resetSlot = frameHeight + spacing;
+    if (stacked)
+        row.controlWidth = avail - resetSlot;
+    else
+    {
+        ImGui::SameLine(x0 + labelWidth + spacing, 0.0f);
+        row.controlWidth = avail - labelWidth - spacing - resetSlot;
+    }
+    if (row.controlWidth < em)
+        row.controlWidth = em;
+    return row;
+}
+
+// Toggle switch drawn with ImDrawList. The hit-test is an InvisibleButton, so
+// mouse, keyboard/gamepad focus and Space/Enter activation work as for any item.
+bool Switch(const char* id, bool* value)
+{
+    const float height = ImGui::GetFrameHeight();
+    const float width = height * 1.9f;
+    const ImVec2 position = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(width, height));
+    if (pressed)
+        *value = !*value;
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec4& track = *value ? (hovered ? kAccentHover : kAccent) : (hovered ? kBgControlHover : kBgControl);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(position, ImVec2(position.x + width, position.y + height), ImGui::GetColorU32(track), height * 0.5f);
+    const float radius = height * 0.5f - 3.0f;
+    draw->AddCircleFilled(ImVec2(*value ? position.x + width - height * 0.5f : position.x + height * 0.5f,
+        position.y + height * 0.5f), radius, ImGui::GetColorU32(*value ? kBgWindow : kTextPrimary));
+    if (ImGui::IsItemFocused() && ImGui::GetIO().NavVisible)
+        draw->AddRect(position, ImVec2(position.x + width, position.y + height), ImGui::GetColorU32(kTextPrimary),
+            height * 0.5f, 0, 2.0f);
+    return pressed;
+}
+
+// Flat undo button in the row's reset slot, shown only when the value differs
+// from its default. True when clicked.
+bool ResetButton(const Row& row, const char* defaultText, bool modified)
+{
+    if (!modified)
+        return false;
+    ImGui::SameLine(row.resetX, 0.0f);
+    const float size = ImGui::GetFrameHeight();
+    const std::string label = std::string(kResetGlyph) + "##reset";
+    const bool clicked = ImGui::Button(label.c_str(), ImVec2(size, size));
     if (ImGui::IsItemHovered())
     {
-        ImGui::BeginTooltip();
-        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32);
-        ImGui::TextUnformatted(text);
-        ImGui::PopTextWrapPos();
-        ImGui::EndTooltip();
+        const std::string text = std::string("Reset to default (") + defaultText + ")";
+        Tooltip(text.c_str());
+    }
+    return clicked;
+}
+
+// Switch on a labelled row; the label toggles it too. True when the value changed
+// (click, label or reset to `fallback`).
+bool SwitchRow(const char* label, const char* help, bool restartPending, bool* value,
+    const bool* fallback = nullptr)
+{
+    ImGui::PushID(label);
+    const Row row = RowLabel(label, help, restartPending);
+    bool changed = row.labelClicked;
+    if (changed)
+        *value = !*value;
+    changed |= Switch("##switch", value);
+    if (fallback && ResetButton(row, *fallback ? "on" : "off", *value != *fallback))
+    {
+        *value = *fallback;
+        changed = true;
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+// Equal-width buttons, the current one in the accent color. -1: nothing clicked;
+// -2: the labels do not fit, the caller falls back to a combo.
+int Segmented(const char* const* labels, int count, int current, float width)
+{
+    const float gap = 2.0f;
+    const float segment = (width - gap * (count - 1)) / count;
+    float widest = 0.0f;
+    for (int i = 0; i < count; ++i)
+    {
+        const float w = ImGui::CalcTextSize(labels[i]).x;
+        widest = w > widest ? w : widest;
+    }
+    if (widest + 2.0f * ImGui::GetStyle().FramePadding.x > segment)
+        return -2;
+    int clicked = -1;
+    for (int i = 0; i < count; ++i)
+    {
+        if (i)
+            ImGui::SameLine(0.0f, gap);
+        const bool active = i == current;
+        if (active)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccentActive);
+            ImGui::PushStyleColor(ImGuiCol_Text, kBgWindow);  // dark text on the accent, never the light one
+        }
+        ImGui::PushID(i);
+        if (ImGui::Button(labels[i], ImVec2(segment, 0)))
+            clicked = i;
+        ImGui::PopID();
+        if (active)
+            ImGui::PopStyleColor(4);
+    }
+    return clicked;
+}
+
+bool PrimaryButton(const char* label)
+{
+    ImGui::PushStyleColor(ImGuiCol_Button, kAccent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccentHover);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, kAccentActive);
+    ImGui::PushStyleColor(ImGuiCol_Text, kBgWindow);
+    const bool clicked = ImGui::Button(label);
+    ImGui::PopStyleColor(4);
+    return clicked;
+}
+
+enum class Tone { kGood, kWarn, kBad, kIdle, kInfo };
+
+const ImVec4& ToneColor(Tone tone)
+{
+    switch (tone)
+    {
+    case Tone::kGood: return kGood;
+    case Tone::kWarn: return kWarning;
+    case Tone::kBad: return kBad;
+    case Tone::kInfo: return kIdle;
+    default: return kIdle;
     }
 }
 
-void RestartHint(const char* key, bool restart)
+const char* ToneGlyph(Tone tone)
 {
-    if (!restart)
-        return;
-    if (NeedsRestart(key))
+    switch (tone)
     {
-        ImGui::SameLine();
-        ImGui::TextColored(kWarning, "Restart the game to apply");
+    case Tone::kGood: return "\xef\x80\x8c";  // check
+    case Tone::kWarn: return "\xef\x81\xb1";  // warning
+    case Tone::kBad: return "\xef\x80\x8d";   // cross
+    case Tone::kInfo: return "\xef\x81\x9a";  // info
+    default: return "\xef\x84\x8c";           // idle circle
     }
+}
+
+// One line of colored status, replaces TextColored(kGood / kWarning).
+void Notice(Tone tone, const char* format, ...)
+{
+    char text[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    ImGui::TextColored(ToneColor(tone), "%s", ToneGlyph(tone));
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", text);
+}
+
+struct Card
+{
+    int id;  // distinct per card shown in the same frame
+    Tone tone;
+    const char* title;
+    const char* body;
+    const char* detail;
+    const char* fix[3];
+    int fixCount;
+};
+
+// Status card: rounded card, 4 px stripe in the tone color, glyph and title,
+// optional body, detail and numbered fixes. A red or orange card carries its fix.
+void StatusCard(const Card& card)
+{
+    ImGui::PushID(card.id);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, kBgCard);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 12.0f));
+    ImGui::BeginChild("##card", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::TextColored(ToneColor(card.tone), "%s", ToneGlyph(card.tone));
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", card.title);
+    if (card.body)
+        ImGui::TextWrapped("%s", card.body);
+    if (card.detail)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextSecondary);
+        ImGui::TextWrapped("%s", card.detail);
+        ImGui::PopStyleColor();
+    }
+    for (int i = 0; i < card.fixCount; ++i)
+        ImGui::TextWrapped("%d. %s", i + 1, card.fix[i]);
+    const ImVec2 position = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    ImGui::GetWindowDrawList()->AddRectFilled(position, ImVec2(position.x + 4.0f, position.y + size.y),
+        ImGui::GetColorU32(ToneColor(card.tone)), 8.0f, ImDrawFlags_RoundCornersLeft);
+    ImGui::EndChild();
+    ImGui::PopID();
+}
+
+// Per-section record of the settings drawn in it: a section is "modified" when
+// one differs from its default, and "reset section" applies every default in a
+// single EditConfig. The flag lags one frame (invisible).
+struct RecordedSetting
+{
+    std::string key;
+    int type;  // 0 bool, 1 unsigned, 2 string
+    bool fallbackBool;
+    uint32_t fallbackUnsigned;
+    std::string fallbackString;
+    bool modified;
+};
+
+struct SectionState
+{
+    bool modified = false;
+    std::vector<RecordedSetting> settings;      // previous frame, used by the reset
+    bool nextModified = false;
+    std::vector<RecordedSetting> nextSettings;  // being recorded this frame
+};
+
+std::map<std::string, SectionState> gSections;
+SectionState* gCurrentSection = nullptr;
+
+void Record(RecordedSetting setting)
+{
+    if (!gCurrentSection)
+        return;
+    gCurrentSection->nextModified |= setting.modified;
+    gCurrentSection->nextSettings.push_back(std::move(setting));
+}
+
+void RecordBool(const char* key, bool value, bool fallback)
+{
+    Record({key, 0, fallback, 0, {}, value != fallback});
+}
+
+void RecordUnsigned(const char* key, uint32_t value, uint32_t fallback)
+{
+    Record({key, 1, false, fallback, {}, value != fallback});
+}
+
+void RecordString(const char* key, const char* value, const char* fallback)
+{
+    Record({key, 2, false, 0, fallback, _stricmp(value, fallback) != 0});
+}
+
+void ResetSection(const SectionState& state)
+{
+    EditConfig("section", [&](std::string& text)
+    {
+        for (const auto& setting : state.settings)
+        {
+            if (!setting.modified)
+                continue;
+            const bool ok = setting.type == 0 ? config_text::SetBool(text, setting.key.c_str(), setting.fallbackBool)
+                : setting.type == 1 ? config_text::SetUnsigned(text, setting.key.c_str(), setting.fallbackUnsigned)
+                : config_text::SetString(text, setting.key.c_str(), setting.fallbackString.c_str());
+            if (!ok)
+                return false;
+        }
+        return true;
+    });
+}
+
+// Starts a section: a small caption with a separator, or a collapsible header
+// (with an optional grey hint after the title). "reset section" shows on the
+// right when a setting in it is modified. Returns false when collapsed, and the
+// caller then draws nothing.
+bool BeginSection(const char* name, const char* hint = nullptr, bool collapsible = false, bool openByDefault = true)
+{
+    SectionState& state = gSections[name];
+    state.modified = state.nextModified;
+    state.settings = std::move(state.nextSettings);
+    state.nextModified = false;
+    state.nextSettings.clear();
+    gCurrentSection = &state;
+
+    ImGui::PushID(name);
+    ImGui::Dummy(ImVec2(0, kSectionGap - ImGui::GetStyle().ItemSpacing.y));
+    bool open = true;
+    float lineOffset = 0.0f;
+    if (!collapsible)
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, kTextSecondary);
+        ImGui::TextUnformatted(name);
+        ImGui::PopStyleColor();
+    }
+    else
+    {
+        const float paddingX = 9.0f, paddingY = 7.0f;
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(paddingX, paddingY));
+        ImGui::SetNextItemOpen(openByDefault, ImGuiCond_Once);
+        open = ImGui::CollapsingHeader(name, ImGuiTreeNodeFlags_AllowOverlap);
+        ImGui::PopStyleVar();
+        const ImVec2 corner = ImGui::GetItemRectMin();
+        if (hint)
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(corner.x + ImGui::GetFontSize() + paddingX * 3.0f + ImGui::CalcTextSize(name).x
+                    + ImGui::GetFontSize() * 1.5f, corner.y + paddingY),
+                ImGui::GetColorU32(kTextSecondary), hint);
+        lineOffset = paddingY;
+    }
+    if (state.modified)
+    {
+        const float x0 = ImGui::GetCursorPosX();
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const char* link = "Reset section";
+        ImGui::SameLine(x0 + avail - ImGui::CalcTextSize(link).x - ImGui::GetStyle().FramePadding.x * 2.0f, 0.0f);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (lineOffset > 0.0f ? lineOffset - 2.0f : 0.0f));
+        if (ImGui::SmallButton(link))
+            ResetSection(state);
+    }
+    if (!collapsible)
+        ImGui::Separator();
+    ImGui::PopID();
+    return open;
+}
+} // namespace ui
+
+void SubSection(const char* name)
+{
+    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::PushStyleColor(ImGuiCol_Text, ui::kTextSecondary);
+    ImGui::TextUnformatted(name);
+    ImGui::PopStyleColor();
+}
+
+bool RestartPending(const char* key, bool restart)
+{
+    return restart && NeedsRestart(key);
 }
 
 void BoolSetting(const char* key, const char* label, bool fallback, bool restart, const char* help)
 {
     bool value = fallback;
     config_text::GetBool(gText, key, value);
-    if (ImGui::Checkbox(label, &value))
+    ui::RecordBool(key, value, fallback);
+    if (ui::SwitchRow(label, help, RestartPending(key, restart), &value, &fallback))
         SaveBool(key, value);
-    Help(help);
-    RestartHint(key, restart);
 }
 
 struct Choice
@@ -303,151 +772,294 @@ struct Choice
     const char* label;
 };
 
+// Segmented buttons when up to four choices fit the row, a combo otherwise.
+// `fallback` (a choice value) enables the reset button and "reset section".
 void ChoiceSetting(const char* key, const char* label, const Choice* choices, int count,
-    bool restart, const char* help)
+    bool restart, const char* help, const char* fallback = nullptr)
 {
-    std::string current;
+    std::string current = fallback ? fallback : "";
     config_text::GetString(gText, key, current);
     int selected = 0;
     for (int i = 0; i < count; ++i)
         if (_stricmp(current.c_str(), choices[i].value) == 0)
             selected = i;
-    if (ImGui::BeginCombo(label, choices[selected].label))
+    if (fallback)
+        ui::RecordString(key, choices[selected].value, fallback);
+    ImGui::PushID(key);
+    const ui::Row row = ui::RowLabel(label, help, RestartPending(key, restart));
+    int picked = -1;
+    bool fits = false;
+    if (count <= 4)
     {
+        const char* labels[4];
         for (int i = 0; i < count; ++i)
-            if (ImGui::Selectable(choices[i].label, i == selected) && i != selected)
-                SaveString(key, choices[i].value);
-        ImGui::EndCombo();
+            labels[i] = choices[i].label;
+        const int result = ui::Segmented(labels, count, selected, row.controlWidth);
+        fits = result != -2;
+        picked = result >= 0 ? result : -1;
     }
-    Help(help);
-    RestartHint(key, restart);
+    if (!fits)
+    {
+        ImGui::SetNextItemWidth(row.controlWidth);
+        if (ImGui::BeginCombo("##choice", choices[selected].label))
+        {
+            for (int i = 0; i < count; ++i)
+            {
+                // The selected row shares the popup's card color: mark it with the accent.
+                ImGui::PushStyleColor(ImGuiCol_Text, i == selected ? ui::kAccent : ui::kTextPrimary);
+                if (ImGui::Selectable(choices[i].label, i == selected))
+                    picked = i;
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    if (picked >= 0 && picked != selected)
+        SaveString(key, choices[picked].value);
+    if (fallback)
+    {
+        const char* defaultLabel = fallback;
+        for (int i = 0; i < count; ++i)
+            if (_stricmp(fallback, choices[i].value) == 0)
+                defaultLabel = choices[i].label;
+        if (ui::ResetButton(row, defaultLabel, _stricmp(current.c_str(), fallback) != 0))
+            SaveString(key, fallback);
+    }
+    ImGui::PopID();
 }
 
-// Slider that only writes the file once the user releases it.
+// Numeric setting picked among a few values, as segmented buttons.
+void UnsignedSegmented(const char* key, const char* label, const uint32_t* values, const char* const* labels,
+    int count, uint32_t fallback, const char* help)
+{
+    uint32_t stored = fallback;
+    config_text::GetUnsigned(gText, key, stored);
+    int selected = -1;
+    const char* defaultLabel = "default";
+    for (int i = 0; i < count; ++i)
+    {
+        if (values[i] == stored)
+            selected = i;
+        if (values[i] == fallback)
+            defaultLabel = labels[i];
+    }
+    ui::RecordUnsigned(key, stored, fallback);
+    ImGui::PushID(key);
+    const ui::Row row = ui::RowLabel(label, help, false);
+    const int picked = ui::Segmented(labels, count, selected, row.controlWidth);
+    if (picked >= 0 && picked != selected)
+        SaveUnsigned(key, values[picked]);
+    if (ui::ResetButton(row, defaultLabel, stored != fallback))
+        SaveUnsigned(key, fallback);
+    ImGui::PopID();
+}
+
+// Slider that only writes the file once the user releases it. A SliderInt made
+// invisible stays the ImGui item (drag, keyboard, Ctrl+click typing, active and
+// deactivated state); the rail, knob and value are drawn over it.
+// `resettable` false: no reset button and not part of "reset section".
 void UnsignedSlider(const char* key, const char* label, int minimum, int maximum,
-    int fallback, const char* format, const char* help)
+    int fallback, const char* format, const char* help, bool resettable = true)
 {
     ImGui::PushID(key);
     static std::string editingKey;
     static int editing = 0;
+    static std::string typingKey;
     const bool active = editingKey == key;
+    const bool typing = typingKey == key;
     uint32_t stored = static_cast<uint32_t>(fallback);
     config_text::GetUnsigned(gText, key, stored);
+    if (resettable)
+        ui::RecordUnsigned(key, stored, static_cast<uint32_t>(fallback));
     int value = active ? editing : static_cast<int>(stored);
     if (value < minimum) value = minimum;
     if (value > maximum) value = maximum;
-    ImGui::SliderInt(label, &value, minimum, maximum, format, ImGuiSliderFlags_AlwaysClamp);
-    if (ImGui::IsItemActive())
+
+    const float em = ImGui::GetFontSize();
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const ui::Row row = ui::RowLabel(label, help, false);
+    char widest[32];
+    snprintf(widest, sizeof(widest), format, maximum);
+    const float valueWidth = ImGui::CalcTextSize(widest).x > ui::kValueEm * em ? ImGui::CalcTextSize(widest).x : ui::kValueEm * em;
+    const float sliderWidth = row.controlWidth - valueWidth - spacing > 2 * em ? row.controlWidth - valueWidth - spacing : 2 * em;
+
+    const float frameHeight = ImGui::GetFrameHeight();
+    const float knobRadius = 0.32f * frameHeight;
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, typing ? ui::kBgControl : ui::kClear);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, typing ? ui::kBgControl : ui::kClear);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, typing ? ui::kBgControl : ui::kClear);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ui::kClear);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ui::kClear);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 2.0f * knobRadius);
+    ImGui::SetNextItemWidth(sliderWidth);
+    ImGui::SliderInt("##value", &value, minimum, maximum, "", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(5);
+
+    const bool itemActive = ImGui::IsItemActive();
+    const bool itemHovered = ImGui::IsItemHovered();
+    const bool typingNow = itemActive && ImGui::GetIO().WantTextInput;
+    if (itemActive)
     {
         editingKey = key;
         editing = value;
     }
     else if (active)
         editingKey.clear();
-    if (ImGui::IsItemDeactivatedAfterEdit())
+    if (typingNow)
+        typingKey = key;
+    else if (typing)
+        typingKey.clear();
+    const bool committed = ImGui::IsItemDeactivatedAfterEdit();
+
+    const ImVec2 low = ImGui::GetItemRectMin();
+    const ImVec2 high = ImGui::GetItemRectMax();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (!typingNow)
+    {
+        // Same knob travel as ImGui's own grab (imgui_widgets.cpp, SliderBehaviorT).
+        const float padding = 2.0f;
+        const float usable = (high.x - low.x) - padding * 2.0f;
+        float grab = usable / static_cast<float>(maximum - minimum + 1);
+        if (grab < 2.0f * knobRadius) grab = 2.0f * knobRadius;
+        if (grab > usable) grab = usable;
+        const float first = low.x + padding + grab * 0.5f;
+        const float last = high.x - padding - grab * 0.5f;
+        const float t = maximum > minimum ? static_cast<float>(value - minimum) / static_cast<float>(maximum - minimum) : 0.0f;
+        const float knobX = first + (last - first) * t;
+        const float centerY = (low.y + high.y) * 0.5f;
+        const float railHalf = (0.14f * frameHeight > 2.0f ? 0.14f * frameHeight : 2.0f) * 0.5f;
+        draw->AddRectFilled(ImVec2(low.x, centerY - railHalf), ImVec2(high.x, centerY + railHalf),
+            ImGui::GetColorU32(ui::kBgControlHover), railHalf);
+        draw->AddRectFilled(ImVec2(low.x, centerY - railHalf), ImVec2(knobX, centerY + railHalf),
+            ImGui::GetColorU32(ui::kAccent), railHalf);
+        if (itemHovered || itemActive)
+        {
+            ImVec4 halo = ui::kAccent;
+            halo.w = 0.35f;
+            draw->AddCircleFilled(ImVec2(knobX, centerY), knobRadius + 3.0f, ImGui::GetColorU32(halo));
+        }
+        draw->AddCircleFilled(ImVec2(knobX, centerY), knobRadius, ImGui::GetColorU32(ui::kTextPrimary));
+    }
+    char text[32];
+    snprintf(text, sizeof(text), format, value);
+    draw->AddText(ImVec2(high.x + spacing + valueWidth - ImGui::CalcTextSize(text).x,
+        low.y + ImGui::GetStyle().FramePadding.y), ImGui::GetColorU32(ui::kTextPrimary), text);
+
+    if (committed)
         SaveUnsigned(key, static_cast<uint32_t>(value));
-    Help(help);
+    if (resettable)
+    {
+        char defaultText[32];
+        snprintf(defaultText, sizeof(defaultText), format, fallback);
+        if (ui::ResetButton(row, defaultText, stored != static_cast<uint32_t>(fallback)))
+            SaveUnsigned(key, static_cast<uint32_t>(fallback));
+    }
     ImGui::PopID();
 }
 
 // ---------------------------------------------------------------------------
 // Panel
 
-void DrawStatus()
+void DrawStatusCard(const DLSSGTStatus& status, bool haveStatus)
 {
-    DLSSGTStatus status{};
-    status.size = sizeof(status);
-    status.version = DLSSGT_ADDON_API_VERSION;
-    if (!gGetStatus || !gGetStatus(&status))
-    {
-        ImGui::TextColored(kWarning, "Engine status unavailable (engine and add-on versions differ?)");
-        return;
-    }
-    if (status.bridgeReady)
-        ImGui::TextColored(kGood, "Engine: ready (%s)", status.route);
-    else
-        ImGui::TextColored(kWarning, "Engine: waiting for the DLSS Frame Generation modules");
-
-    if (!status.setOptionsSeen)
-        ImGui::TextUnformatted("Frame Generation: waiting for the game");
+    using ui::Tone;
+    ui::Card card{};
+    char detail[192] = "";
+    static char title[64];
+    if (!haveStatus)
+        card = {1, Tone::kWarn, "Engine status unavailable", "Engine and add-on versions may differ.", nullptr, {}, 0};
+    else if (!status.bridgeReady)
+        card = {1, Tone::kIdle, "Waiting for the DLSS Frame Generation modules", nullptr, nullptr, {}, 0};
+    else if (!gLoaded)
+        card = {1, Tone::kIdle, "Waiting for DLSSG-Transfusion.json...", nullptr, nullptr, {}, 0};
+    else if (!status.setOptionsSeen)
+        card = {1, Tone::kIdle, "Waiting for the game", nullptr, nullptr, {}, 0};
     else if (!status.frameGenerationOn)
-        ImGui::TextUnformatted("Frame Generation: off in the game");
+        card = {1, Tone::kIdle, "Frame Generation is off in the game", nullptr, nullptr,
+            {"Turn Frame Generation on in the game's settings."}, 1};
+    else if (status.setOptionsResult == 39)
+        card = {1, Tone::kWarn, "Low VRAM", nullptr, nullptr, {"Lower the resolution or the multiplier."}, 1};
+    else if (status.setOptionsResult != 0)
+    {
+        snprintf(title, sizeof(title), "Streamline error %d", status.setOptionsResult);
+        card = {1, Tone::kWarn, title, nullptr, nullptr, {}, 0};
+    }
+    else if (status.pending)
+        card = {1, Tone::kWarn, "Change pending", nullptr, nullptr,
+            {"If nothing happens, turn Frame Generation off and on in the game."}, 1};
     else
     {
         const bool fresh = status.stateSampleAgeMs <= 2500 && status.actualFramesPresented > 0;
-        if (fresh)
-            ImGui::Text("Frame Generation: on | requested %ux | actual %ux",
-                status.appliedMultiplier, status.actualFramesPresented);
-        else
-            ImGui::Text("Frame Generation: on | requested %ux", status.appliedMultiplier);
-        if (status.setOptionsResult == 39)
-        {
-            ImGui::SameLine();
-            ImGui::TextColored(kWarning, "(VRAM low)");
-        }
-        else if (status.setOptionsResult != 0)
-        {
-            ImGui::SameLine();
-            ImGui::TextColored(kWarning, "(Streamline error %d)", status.setOptionsResult);
-        }
+        const int length = fresh ? snprintf(detail, sizeof(detail), "requested %ux | actual %ux",
+                status.appliedMultiplier, status.actualFramesPresented)
+            : snprintf(detail, sizeof(detail), "requested %ux", status.appliedMultiplier);
+        if (status.fpsSampleAgeMs <= 2000 && status.realFpsMilli && status.dlssFpsMilli && length > 0
+            && length < static_cast<int>(sizeof(detail)))
+            snprintf(detail + length, sizeof(detail) - length, "\n%.0f rendered | %.0f displayed FPS",
+                status.realFpsMilli / 1000.0, status.dlssFpsMilli / 1000.0);
+        card = {1, Tone::kGood, "Frame Generation is active", nullptr, detail, {}, 0};
     }
-    if (status.pending)
-        ImGui::TextColored(kWarning, "Change pending: if it is not picked up, turn Frame Generation off and on in the game.");
-    if (status.fpsSampleAgeMs <= 2000 && status.realFpsMilli && status.dlssFpsMilli)
-        ImGui::Text("FPS: %.0f rendered | %.0f displayed",
-            status.realFpsMilli / 1000.0, status.dlssFpsMilli / 1000.0);
+    ui::StatusCard(card);
+}
+
+void DrawEngineDetails(const DLSSGTStatus& status)
+{
     static const char* const kSources[] = {"none", "game", "UI assist"};
     static const char* const kUir[] = {"off", "on", "on (forced)"};
-    ImGui::Text("UIR: %s | HUD-less: %s | UI alpha: %s",
+    static char text[1024];
+    int length = 0;
+    auto add = [&](const char* format, auto... values)
+    {
+        if (length > 0 && length < static_cast<int>(sizeof(text)) - 1)
+            text[length++] = '\n';
+        if (length < static_cast<int>(sizeof(text)))
+            length += snprintf(text + length, sizeof(text) - length, format, values...);
+        if (length >= static_cast<int>(sizeof(text)))
+            length = static_cast<int>(sizeof(text)) - 1;
+    };
+    add("Route: %s", status.route);
+    add("UIR: %s | HUD-less: %s | UI alpha: %s",
         kUir[status.uiRecomposition < 3 ? status.uiRecomposition : 0],
         kSources[status.hudlessSource < 3 ? status.hudlessSource : 0],
         status.uiAlphaSource == 2 ? "injected (UI assist)" : kSources[status.uiAlphaSource < 3 ? status.uiAlphaSource : 0]);
     if (status.pacingValid)
-        ImGui::Text("Frame pacing: %.2f ms avg | %.2f ms 99th pct | %.2f ms jitter",
+        add("Frame pacing: %.2f ms avg | %.2f ms 99th pct | %.2f ms jitter",
             status.pacingAverageUs / 1000.0, status.pacingP99Us / 1000.0, status.pacingJitterUs / 1000.0);
     if (status.gpuValid)
-        ImGui::Text("GPU: %u%% | %u C | %.0f W | %u / %u MHz | VRAM %.1f / %.1f GB",
+        add("GPU: %u%% | %u C | %.0f W | %u / %u MHz | VRAM %.1f / %.1f GB",
             status.gpuUtilization, status.gpuTemperatureC, status.gpuPowerMilliwatts / 1000.0,
             status.gpuClockMhz, status.gpuMemoryClockMhz, status.vramUsedMb / 1024.0, status.vramTotalMb / 1024.0);
     if (status.debugLine[0])
-        ImGui::TextDisabled("Debug: %s", status.debugLine);
-    ImGui::TextDisabled("DLSS %s | DLSS-G %s | Streamline %s",
+        add("Debug: %s", status.debugLine);
+    add("DLSS %s | DLSS-G %s | Streamline %s",
         status.dlssVersion[0] ? status.dlssVersion : "not loaded",
         status.dlssgVersion[0] ? status.dlssgVersion : "not loaded",
         status.streamlineVersion[0] ? status.streamlineVersion : "not loaded");
-}
-
-void DrawGpu()
-{
-    ImGui::Dummy(ImVec2(0, 4));
-    static const Choice gpus[] = {
-        {"auto", "Automatic"}, {"ada", "RTX 40 (Ada)"},
-        {"ampere", "RTX 30 (Ampere)"}, {"turing", "RTX 20 (Turing)"},
-    };
-    ChoiceSetting("gpuArchitecture", "GPU architecture", gpus, 4, true,
-        "Which kernel patches the engine applies. Leave on Automatic unless detection fails. "
-        "Read at game start: restart the game.");
+    ui::StatusCard({4, ui::Tone::kInfo, "Engine details", nullptr, text, {}, 0});
 }
 
 void DrawGeneration()
 {
-    Section("Frame generation");
+    ui::BeginSection("Frame generation");
     static const Choice modes[] = {
-        {"fixed", "Fixed multiplier"},
-        {"dynamic", "Dynamic (target FPS)"},
+        {"fixed", "Fixed"},
+        {"dynamic", "Dynamic"},
         {"game", "Game decides"},
     };
     ChoiceSetting("mode", "Mode", modes, 3, false,
         "Fixed: always use the multiplier below.\n"
         "Dynamic: DLSS-G picks the multiplier to reach the target FPS.\n"
         "Game decides: follow the game's own Frame Generation setting, or NVIDIA Profile Inspector.\n"
-        "Applied live.");
+        "Applied live.", "game");
 
     std::string mode = "game";
     config_text::GetString(gText, "mode", mode);
     if (_stricmp(mode.c_str(), "fixed") == 0)
     {
-        UnsignedSlider("multiplier", "Multiplier", 2, 6, 4, "%dx",
+        static const uint32_t values[] = {2, 3, 4, 5, 6};
+        static const char* const labels[] = {"2x", "3x", "4x", "5x", "6x"};
+        UnsignedSegmented("multiplier", "Multiplier", values, labels, 5, 4,
             "Total frames shown per rendered frame. 5x and 6x are experimental. Applied live.");
     }
     else if (_stricmp(mode.c_str(), "dynamic") == 0)
@@ -458,12 +1070,15 @@ void DrawGeneration()
         if (target != 0)
             lastCustomTarget = target;
         bool followDisplay = target == 0;
-        if (ImGui::Checkbox("Follow display refresh rate", &followDisplay))
+        static const bool followDefault = true;
+        if (ui::SwitchRow("Follow display refresh rate",
+                "Aim for the refresh rate of the monitor showing the game. Applied live.", false, &followDisplay,
+                &followDefault))
             SaveUnsigned("dynamicTargetFrameRate", followDisplay ? 0 : lastCustomTarget);
-        Help("Aim for the refresh rate of the monitor showing the game. Applied live.");
+        ui::RecordUnsigned("dynamicTargetFrameRate", target, 0);
         if (!followDisplay)
             UnsignedSlider("dynamicTargetFrameRate", "Target FPS", 30, 500, 120, "%d FPS",
-                "Frame rate Dynamic mode aims for. Applied live.");
+                "Frame rate Dynamic mode aims for. Applied live.", false);
         BoolSetting("dynamicExperimental56", "Allow 5x and 6x", false, false,
             "Let Dynamic mode go up to 6x. Needs plenty of VRAM. Applied live.");
     }
@@ -471,14 +1086,12 @@ void DrawGeneration()
     {
         ImGui::TextWrapped("The game (or NVIDIA Profile Inspector) chooses the multiplier and mode.");
     }
-    BoolSetting("disableKeybinds", "Disable keyboard shortcuts", false, false,
-        "Turns off the Ctrl+Alt shortcuts and lets the game or Profile Inspector control the multiplier "
-        "(same as \"Game decides\", plus no overlay shortcuts). Applied live.");
 }
 
 void DrawDisplay()
 {
-    Section("Overlay");
+    if (!ui::BeginSection("Overlay", "corner, extra lines", true, false))
+        return;
     BoolSetting("showOverlay", "Show multiplier / FPS overlay", false, false,
         "Small in-game counter drawn by DLSSG-Transfusion (Ctrl+Alt+O). In Vulkan games this add-on draws it, "
         "with the game's frame rate times the multiplier. Applied live.");
@@ -487,8 +1100,8 @@ void DrawDisplay()
         {"bottom-left", "Bottom left"}, {"bottom-right", "Bottom right"},
     };
     ChoiceSetting("overlayPosition", "Overlay position", corners, 4, false,
-        "Screen corner of the overlay (Ctrl+Alt+P). Applied live.");
-    ImGui::TextDisabled("Extra overlay lines:");
+        "Screen corner of the overlay (Ctrl+Alt+P). Applied live.", "top-left");
+    SubSection("Extra overlay lines");
     BoolSetting("overlayShowUiRecomposition", "UI recomposition (UIR)", false, false,
         "Adds \"UIR ON / ON FORCED / OFF\": whether DLSS-G recomposes the HUD separately. Applied live.");
     BoolSetting("overlayShowHudless", "HUD-less source", false, false,
@@ -503,7 +1116,7 @@ void DrawDisplay()
     BoolSetting("overlayShowFramePacing", "Frame pacing", false, false,
         "Adds \"FT / P99 / JIT\": average time between displayed frames (generated ones included), its 99th "
         "percentile and its jitter (standard deviation). Even pacing means P99 close to FT and a low JIT. Applied live.");
-    BoolSetting("overlayShowGpu", "GPU load, temperature, power, clocks", false, false,
+    BoolSetting("overlayShowGpu", "GPU load, temp, power, clocks", false, false,
         "Adds \"GPU % C W MHZ\" read from the NVIDIA driver (NVML) once per second. Applied live.");
     BoolSetting("overlayShowVram", "VRAM usage", false, false,
         "Adds \"VRAM used/total GB\" for the whole GPU (all processes), read from NVML. Applied live.");
@@ -528,11 +1141,18 @@ void SetCapture(bool active)
 void DrawHotkeys(reshade::api::effect_runtime* runtime)
 {
     using namespace hotkey_binding;
-    Section("Keyboard shortcuts");
+    if (!ui::BeginSection("Keyboard shortcuts", nullptr, true, false))
+    {
+        // Collapsed: nothing is recorded or typed, so the engine keeps its shortcuts.
+        gListening = -1;
+        SetCapture(false);
+        return;
+    }
     static char buffers[kActionCount][128]{};
     static FILETIME loadedFrom{};
     static bool dirty = false, loaded = false;
     static char message[160] = "";
+    static bool messageGood = false;
     if (!dirty && (!loaded || CompareFileTime(&loadedFrom, &gWriteTime) != 0))
     {
         for (uint32_t action = 0; action < kActionCount; ++action)
@@ -548,48 +1168,49 @@ void DrawHotkeys(reshade::api::effect_runtime* runtime)
     bool disabled = false;
     config_text::GetBool(gText, "disableKeybinds", disabled);
     if (disabled)
-        ImGui::TextColored(kWarning, "Shortcuts are off (\"Disable keyboard shortcuts\" above).");
+        ui::Notice(ui::Tone::kWarn, "Keyboard shortcuts are disabled (disableKeybinds in DLSSG-Transfusion.json).");
+    ImGui::PushStyleColor(ImGuiCol_Text, ui::kTextSecondary);
     ImGui::TextWrapped("Record a combination or type it (e.g. Ctrl+Alt+F5). Separate alternatives with commas; "
         "leave empty to disable an action.");
+    ImGui::PopStyleColor();
 
+    const float em = ImGui::GetFontSize();
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
     bool captureStarted = false;
-    if (ImGui::BeginTable("shortcuts", 3, ImGuiTableFlags_SizingStretchProp))
+    for (uint32_t action = 0; action < kActionCount; ++action)
     {
-        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("Binding", ImGuiTableColumnFlags_WidthStretch, 1.4f);
-        ImGui::TableSetupColumn("Record", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 5.5f);
-        for (uint32_t action = 0; action < kActionCount; ++action)
+        ImGui::PushID(static_cast<int>(action));
+        const ui::Row row = ui::RowLabel(Info(action).label, nullptr, false);
+        const float recordWidth = em * 5.5f;
+        const float bindingWidth = row.controlWidth - recordWidth - spacing;
+        ImGui::SetNextItemWidth(bindingWidth > 2 * em ? bindingWidth : 2 * em);
+        ImGui::BeginDisabled(gListening >= 0);
+        if (ImGui::InputText("##binding", buffers[action], sizeof(buffers[action])))
+            dirty = true;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(gListening == static_cast<int>(action) ? "Cancel" : "Record", ImVec2(recordWidth, 0)))
         {
-            ImGui::PushID(static_cast<int>(action));
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(Info(action).label);
-            ImGui::TableNextColumn();
-            ImGui::SetNextItemWidth(-1);
-            ImGui::BeginDisabled(gListening >= 0);
-            if (ImGui::InputText("##binding", buffers[action], sizeof(buffers[action])))
-                dirty = true;
-            ImGui::EndDisabled();
-            ImGui::TableNextColumn();
-            if (ImGui::Button(gListening == static_cast<int>(action) ? "Cancel" : "Record", ImVec2(-1, 0)))
+            if (gListening == static_cast<int>(action))
+                gListening = -1;
+            else
             {
-                if (gListening == static_cast<int>(action))
-                    gListening = -1;
-                else
-                {
-                    gListening = static_cast<int>(action);
-                    captureStarted = true;
-                }
+                gListening = static_cast<int>(action);
+                captureStarted = true;
             }
-            ImGui::PopID();
         }
-        ImGui::EndTable();
+        if (ui::ResetButton(row, Info(action).defaults[0] ? Info(action).defaults : "none",
+                std::strcmp(buffers[action], Info(action).defaults) != 0))
+        {
+            strncpy_s(buffers[action], Info(action).defaults, _TRUNCATE);
+            dirty = true;
+        }
+        ImGui::PopID();
     }
 
     if (gListening >= 0)
     {
-        ImGui::TextColored(kWarning, "Press the combination for \"%s\" (Escape cancels).", Info(gListening).label);
+        ui::Notice(ui::Tone::kWarn, "Press the combination for \"%s\" (Escape cancels).", Info(gListening).label);
         for (uint32_t key = 8; !captureStarted && key < 255; ++key)
         {
             if (!runtime->is_key_pressed(key))
@@ -616,7 +1237,7 @@ void DrawHotkeys(reshade::api::effect_runtime* runtime)
     // The engine ignores its shortcuts while one is recorded or typed.
     SetCapture(gListening >= 0 || ImGui::IsAnyItemActive());
 
-    if (ImGui::Button("Save shortcuts"))
+    if (ui::PrimaryButton("Save shortcuts"))
     {
         Binding parsed[kActionCount];
         int invalid = -1, conflictA = -1, conflictB = -1;
@@ -631,6 +1252,7 @@ void DrawHotkeys(reshade::api::effect_runtime* runtime)
                     conflictB = static_cast<int>(b);
                     break;
                 }
+        messageGood = false;
         if (invalid >= 0)
             snprintf(message, sizeof(message), "\"%s\": unknown key or invalid combination.", Info(invalid).label);
         else if (conflictA >= 0)
@@ -645,6 +1267,7 @@ void DrawHotkeys(reshade::api::effect_runtime* runtime)
             }))
         {
             dirty = false;
+            messageGood = true;
             snprintf(message, sizeof(message), "Shortcuts saved and active. No restart needed.");
         }
         else
@@ -658,21 +1281,19 @@ void DrawHotkeys(reshade::api::effect_runtime* runtime)
         dirty = true;
     }
     if (dirty)
-    {
-        ImGui::SameLine();
-        ImGui::TextColored(kWarning, "Unsaved changes");
-    }
+        ui::Notice(ui::Tone::kWarn, "Unsaved changes");
     if (message[0])
-        ImGui::TextWrapped("%s", message);
+        ui::Notice(messageGood ? ui::Tone::kGood : ui::Tone::kWarn, "%s", message);
 }
 
 void DrawQuality()
 {
-    Section("Image quality");
+    if (!ui::BeginSection("Image quality", "restart", true, true))
+        return;
     BoolSetting("blackwellTransfusion", "Blackwell kernel transfusion", true, true,
         "Uses the RTX 50 (sm_120) frame-generation kernels on this GPU. Required for 3x-6x quality. "
         "Read when DLSS-G loads: restart the game.");
-    BoolSetting("qualityValidWarp", "Anti-tearing / anti-ghosting protection", true, true,
+    BoolSetting("qualityValidWarp", "Anti-tearing / anti-ghosting", true, true,
         "Candidate agreement firewall and thin-geometry protection (fences, foliage). "
         "Read when DLSS-G loads: restart the game.");
     static const Choice policies[] = {
@@ -681,14 +1302,14 @@ void DrawQuality()
     };
     ChoiceSetting("qualityPolicy", "Protection tuning", policies, 2, true,
         "Tuning of the protection above. Explained warp is the recommended default. "
-        "Read when DLSS-G loads: restart the game.");
+        "Read when DLSS-G loads: restart the game.", "explained-warp");
     BoolSetting("optimizedKernels", "Optimized kernels", true, true,
         "Faster, bit-exact frame-generation kernels. Read when DLSS-G loads: restart the game.");
 }
 
 void DrawDlssSuperResolution()
 {
-    Section("DLSS Super Resolution");
+    ui::BeginSection("DLSS Super Resolution");
     DLSSGTStatus status{};
     status.size = sizeof(status);
     status.version = DLSSGT_ADDON_API_VERSION;
@@ -696,7 +1317,7 @@ void DrawDlssSuperResolution()
         return;
 
     if (status.srObserved && status.srOutputWidth)
-        ImGui::Text("Rendering %u x %u -> %u x %u (%.1f%%)", status.srInputWidth, status.srInputHeight,
+        ImGui::TextDisabled("Rendering %u x %u -> %u x %u (%.1f%%)", status.srInputWidth, status.srInputHeight,
             status.srOutputWidth, status.srOutputHeight, 100.0 * status.srInputWidth / status.srOutputWidth);
     else if (status.srHooked)
         ImGui::TextDisabled("DLSS Super Resolution is not running right now.");
@@ -713,7 +1334,7 @@ void DrawDlssSuperResolution()
         "hide its quality setting. Game setting leaves the game in control. It changes the render "
         "resolution, not the K/M neural model. Applied live, but some games only pick it up after a "
         "resolution or graphics change, or ignore it. In Unreal Engine games, r.ScreenPercentage is "
-        "driven live when it can be found (shown below).");
+        "driven live when it can be found (shown below).", "game");
     std::string preset;
     config_text::GetString(gText, "dlssRenderScale", preset);
     if (_stricmp(preset.c_str(), "custom") == 0)
@@ -721,7 +1342,7 @@ void DrawDlssSuperResolution()
             "Render resolution in percent of the output, per axis (width and height). Applied live.");
 
     if (status.unrealState == 2)
-        ImGui::TextColored(kGood, "Unreal Engine: live control of r.ScreenPercentage (now %.1f%%).",
+        ui::Notice(ui::Tone::kGood, "Unreal Engine: live control of r.ScreenPercentage (now %.1f%%).",
             status.unrealScreenPercentageMilli / 1000.0);
     else if (status.unrealState == 0)
         ImGui::TextDisabled("Looking for Unreal Engine's r.ScreenPercentage...");
@@ -729,16 +1350,17 @@ void DrawDlssSuperResolution()
     if (status.srScale)
     {
         if (status.srVerified)
-            ImGui::TextColored(kGood, "The game renders at the requested resolution.");
+            ui::Notice(ui::Tone::kGood, "The game renders at the requested resolution.");
         else if (status.srObserved)
-            ImGui::TextColored(kWarning, "Waiting for the game to render at the requested resolution. If it never "
+            ui::Notice(ui::Tone::kWarn, "Waiting for the game to render at the requested resolution. If it never "
                 "changes, this game ignores the override: use its own settings.");
     }
 }
 
 void DrawUi()
 {
-    Section("HUD / UI");
+    if (!ui::BeginSection("HUD / UI", nullptr, true, true))
+        return;
     BoolSetting("autoUiRecomposition", "Automatic UI recomposition", true, false,
         "Turns UI recomposition on when the game provides HUD-less and UI buffers without asking for it. "
         "Turn off to follow the game's own choice, if the generated frames look wrong with it. Applied live.");
@@ -746,14 +1368,37 @@ void DrawUi()
         "Asks DLSS-G to recompose the HUD separately even when the game does not request it. "
         "Reduces HUD ghosting when the game provides the right buffers. Applied live; some games "
         "need Frame Generation turned off and on.");
-    BoolSetting("uiAssist", "UI assist (D3D12)", false, false,
+    BoolSetting("uiAssist", "UI assist (D3D12)", true, false,
         "Captures the HUD-less scene and builds the UI layer when the game does not tag them. "
         "Applied live.");
 }
 
 void DrawCompatibility()
 {
-    Section("Compatibility");
+    if (!ui::BeginSection("Compatibility", "only change if you know what you are doing", true, true))
+        return;
+    SubSection("Smooth Motion (RTX 30, experimental)");
+    BoolSetting("smoothMotionSm86", "Smooth Motion (RTX 30)", false, true,
+        "Experimental driver Smooth Motion for RTX 30 (Ampere). Only the NVIDIA 617.14 driver build "
+        "has been verified. Read at game start: restart the game.");
+    bool smoothMotion = false;
+    config_text::GetBool(gText, "smoothMotionSm86", smoothMotion);
+    static const Choice smoothMotionApis[] = {
+        {"d3d12", "Direct3D 12"}, {"d3d11", "Direct3D 11"}, {"vulkan", "Vulkan"},
+    };
+    ImGui::BeginDisabled(!smoothMotion);
+    ChoiceSetting("smoothMotionSm86Api", "Graphics API", smoothMotionApis, 3, true,
+        "Pick the graphics API the game really uses, not the engine (see the game's page on "
+        "https://www.pcgamingwiki.com/). Read at game start: restart the game.", "d3d12");
+    ImGui::EndDisabled();
+    SubSection("Other");
+    static const Choice gpus[] = {
+        {"auto", "Automatic"}, {"ada", "RTX 40 (Ada)"},
+        {"ampere", "RTX 30 (Ampere)"}, {"turing", "RTX 20 (Turing)"},
+    };
+    ChoiceSetting("gpuArchitecture", "GPU architecture", gpus, 4, true,
+        "Which kernel patches the engine applies. Leave on Automatic unless detection fails. "
+        "Read at game start: restart the game.", "auto");
     BoolSetting("disableMenuDetection", "Disable menu detection", false, false,
         "Keeps frame generation running in menus and loading screens. Leave off: idling at 1x there "
         "avoids device-hang crashes in several games. Applied live.");
@@ -768,7 +1413,8 @@ void DrawCompatibility()
 
 void DrawDiagnostics()
 {
-    Section("Diagnostics");
+    if (!ui::BeginSection("Diagnostics", nullptr, true, false))
+        return;
     BoolSetting("logPerformance", "Log performance", false, false,
         "Writes FPS and frame times to DLSSG-Transfusion_perf.csv. Applied live.");
     BoolSetting("logMotionTracing", "Log motion tracing", false, false,
@@ -779,44 +1425,53 @@ void DrawDiagnostics()
 
 void DrawPanel(reshade::api::effect_runtime* runtime)
 {
-    ImGui::PushItemWidth(ImGui::GetFontSize() * 14);
+    // Owns every style push (and the background child) until this function
+    // returns, whichever way it returns. Nothing is pushed anywhere else.
+    ui::PanelScope style;
+    static const ULONGLONG firstFrame = GetTickCount64();
     if (!ConnectEngine())
     {
-        ImGui::TextWrapped("DLSSG-Transfusion engine not found in this game. Install DLSSG-Transfusion.dll "
-            "(or the .asi) next to the game executable, then restart the game.");
-        ImGui::PopItemWidth();
+        // Red only once the engine is really missing, so it does not flash while the game loads.
+        if (GetTickCount64() - firstFrame > 5000)
+            ui::StatusCard({1, ui::Tone::kBad, "DLSSG-Transfusion engine not found", nullptr, nullptr,
+                {"Copy DLSSG-Transfusion.dll (or the .asi) next to the game executable.", "Restart the game."}, 2});
+        else
+            ui::StatusCard({1, ui::Tone::kIdle, "Looking for the engine...", nullptr, nullptr, {}, 0});
         return;
     }
     ReloadIfChanged();
-    DrawStatus();
+    DLSSGTStatus status{};
+    status.size = sizeof(status);
+    status.version = DLSSGT_ADDON_API_VERSION;
+    const bool haveStatus = gGetStatus && gGetStatus(&status);
+    DrawStatusCard(status, haveStatus);
     if (!gLoaded)
-    {
-        ImGui::TextWrapped("Waiting for DLSSG-Transfusion.json...");
-        ImGui::PopItemWidth();
         return;
-    }
     const int restart = PendingRestartCount();
     if (restart)
-        ImGui::TextColored(kWarning, "%d change(s) take effect after restarting the game.", restart);
+    {
+        static char title[96];
+        snprintf(title, sizeof(title), "%d change(s) take effect after restarting the game", restart);
+        ui::StatusCard({2, ui::Tone::kWarn, title, nullptr, nullptr, {}, 0});
+    }
     if (gMessage[0])
-        ImGui::TextColored(kWarning, "%s", gMessage);
-
-    DrawGpu();
+        ui::StatusCard({3, ui::Tone::kWarn, "Could not save the settings", gMessage, nullptr, {}, 0});
+    if (haveStatus)
+        DrawEngineDetails(status);
     DrawGeneration();
+    DrawDlssSuperResolution();
     DrawDisplay();
     DrawQuality();
-    DrawDlssSuperResolution();
     DrawUi();
     DrawCompatibility();
     DrawDiagnostics();
     DrawHotkeys(runtime);
 
-    Section("Configuration file");
+    ui::BeginSection("Configuration file");
     char path[MAX_PATH * 4]{};
     WideCharToMultiByte(CP_UTF8, 0, gConfigPath.c_str(), -1, path, sizeof(path), nullptr, nullptr);
     ImGui::TextDisabled("%s", path);
     ImGui::TextDisabled("Settings are saved immediately; shortcuts when you press \"Save shortcuts\".");
-    ImGui::PopItemWidth();
 }
 
 bool OnOverlay(reshade::api::effect_runtime*, bool open, reshade::api::input_source)
