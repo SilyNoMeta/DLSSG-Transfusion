@@ -2,6 +2,16 @@
 
 *English: [HUD-ASSIST.md](HUD-ASSIST.md)*
 
+Depuis v1.4.5.2-rtx20-30-40, UI assist examine tous les tags d'un lot
+`slSetTag` avant de copier l'image sans HUD. Si le jeu fournit également sa
+propre couche UI, cette copie inutile est évitée. Ce changement a corrigé le
+crash signalé au chargement d'une sauvegarde Starfield avec `uiAssist=true`.
+
+Pour diagnostiquer les copies et barrières, activez
+`diagnostics.logHudUi` dans le JSON ou **Log HUD/UI** dans le panneau ReShade.
+Le réglage s'applique sans redémarrage, trace seulement les trois premières
+copies HUD-less du jeu et reste désactivé par défaut.
+
 Branche `feat/sm86-75-hud-alpha`, rapatriée dans `feat/sm86-75`. Portage du travail de dlssg_for_sm86 (`src/companion/hudless_capture.hpp`, licence MIT, `feat/0.3.5` au commit `2bff790`). Guide d'origine : `docs/GUIDE-HUD-ALPHA.fr.md` de ce projet.
 
 ## Ce que ça apporte à Transfusion

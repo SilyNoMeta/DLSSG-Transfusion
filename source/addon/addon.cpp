@@ -773,6 +773,8 @@ void DrawDiagnostics()
         "Writes FPS and frame times to DLSSG-Transfusion_perf.csv. Applied live.");
     BoolSetting("logMotionTracing", "Log motion tracing", false, false,
         "Very verbose motion-vector diagnostics for debugging only. Applied live.");
+    BoolSetting("logHudUi", "Log HUD/UI", false, false,
+        "Trace the first three game HUD-less copies and D3D12 barrier steps. Applied live.");
 }
 
 void DrawPanel(reshade::api::effect_runtime* runtime)

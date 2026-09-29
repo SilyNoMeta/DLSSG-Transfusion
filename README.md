@@ -8,8 +8,12 @@ This is a fork of [TonyJoaca/DLSSG-Transfusion](https://github.com/TonyJoaca/DLS
 v1.4.5. Tony's patches on NVIDIA's runtime remain the engine; this fork extends them to older
 GPUs and adds the features below.
 
-### What's New in Version v1.4.5.1-rtx20-30-40
-This release adds experimental driver Smooth Motion on RTX 30. The earlier fork release gathered the private builds v1.4.5.1 to v1.4.5.3-rtx2030 and the Vulkan work. Full changelog (English and French): [CHANGELOG.md](CHANGELOG.md).
+### What's New in Version v1.4.5.2-rtx20-30-40
+This hotfix avoids a Starfield crash with `uiAssist` enabled when the game supplies a HUD-less image and its own UI tag in the same Streamline batch. The affected user's save now loads with DLSS-G active, and a separate Cyberpunk 2077 regression test passed. The previous release added experimental driver Smooth Motion on RTX 30. Full changelog: [CHANGELOG.md](CHANGELOG.md).
+
+Optional HUD/UI copy tracing is now `diagnostics.logHudUi` (off by default, live in JSON or ReShade), with no game-specific diagnostic build flag.
+
+Thanks to [**jay33721**](https://github.com/jay33721) for helping us identify the Starfield UI-assist error.
 
 - **RTX 30 (Ampere) support, RTX 20 (Turing) experimental**: architecture gates lowered to the GPU present, Blackwell kernels retargeted, Ampere-only instructions rewritten for Turing. See [docs/RTX30-SM86.md](docs/RTX30-SM86.md).
 - **`explained-warp`, our valid-warp policy, by default**: it keeps the warp where it explains what changed between the two frames, which keeps fine detail and clean moving shadows at the same time. Tony's `transfusion` policy remains available. See [docs/QUALITY-POLICY.md](docs/QUALITY-POLICY.md).
@@ -20,9 +24,8 @@ This release adds experimental driver Smooth Motion on RTX 30. The earlier fork 
 - **ReShade settings panel**, `"mode": "game"` by default, remappable shortcuts, optional overlay lines, DLSS render resolution (with live `r.ScreenPercentage` in Unreal Engine games), readable JSON. See [INJECTION.md](INJECTION.md#reshade-settings-panel-optional).
 - **Fixes**: Cyberpunk 2077 startup crash; DOOM: The Dark Ages crash with the overlay shown.
 
-Known issue: a Starfield user reported a D3D12 crash with `uiAssist` active;
-this has not reproduced locally and is still under investigation. If affected,
-set `"uiAssist": false` in `DLSSG-Transfusion.json` and restart the game.
+If another Starfield setup still crashes with `uiAssist`, please attach the
+current log and crash log; this fix was validated on the originally reported save.
 
 Dynamic defaults to a 4x ceiling; the panel's toggle allows experimental 5x and 6x.
 

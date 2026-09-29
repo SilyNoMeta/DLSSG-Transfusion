@@ -1,4 +1,20 @@
-# DLSSG-Transfusion v1.4.5.1-rtx20-30-40
+# DLSSG-Transfusion v1.4.5.2-rtx20-30-40
+
+## v1.4.5.2-rtx20-30-40 — Starfield UI assist hotfix
+
+- Inspect the whole Streamline tag batch before copying a game-provided
+  HUD-less image. When the game also supplies its own UI tag, the redundant
+  copy and its D3D12 resource transition are skipped.
+- The originally affected Starfield user reports that the save now loads and
+  DLSS-G works with `uiAssist=true`. A separate Cyberpunk 2077 test found no
+  regression. These reports do not establish compatibility with every setup.
+- Added GPU regression tests for both game UI tag types. No Smooth Motion or
+  kernel changes are included in this hotfix.
+- HUD/UI copy tracing is now a general, live `diagnostics.logHudUi` setting
+  (off by default), available in the ReShade panel; no game-specific build
+  flag is needed.
+- Thanks to [**jay33721**](https://github.com/jay33721) for helping identify
+  the Starfield UI-assist error.
 
 ## v1.4.5.1-rtx20-30-40 — experimental Smooth Motion on RTX 30
 

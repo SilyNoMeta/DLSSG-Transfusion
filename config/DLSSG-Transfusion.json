@@ -47,7 +47,8 @@
   },
   "diagnostics": {
     "logPerformance": false,                 // Write FPS and frame times to DLSSG-Transfusion_perf.csv.
-    "logMotionTracing": false                // Very verbose motion-vector diagnostics, for debugging only.
+    "logMotionTracing": false,               // Very verbose motion-vector diagnostics, for debugging only.
+    "logHudUi": false                        // Trace the first three game HUD-less copies and D3D12 barrier steps. Applied live.
   },
   "keyboardShortcuts": {
     "hotkeyFixed2": "Ctrl+Alt+2, Ctrl+Alt+Num2", // Combinations such as Ctrl+Alt+4 or Ctrl+Shift+F5; several separated by commas; empty disables the action.

@@ -1,5 +1,11 @@
 # UI assist: HUD-less capture and UI layer synthesis (D3D12)
 
+Since v1.4.5.2-rtx20-30-40, UI assist checks every tag in a game's
+`slSetTag` batch before copying the HUD-less image. If the batch contains a
+game-provided UI layer, it skips that unnecessary copy. This fixed the
+reported Starfield save-load crash with `uiAssist=true` without changing the
+game's own UI tags.
+
 *Français : [HUD-ASSIST.fr.md](HUD-ASSIST.fr.md)*
 
 Branch `feat/sm86-75-hud-alpha`, merged into `feat/sm86-75`. Port of dlssg_for_sm86's work (`src/companion/hudless_capture.hpp`, MIT license, `feat/0.3.5` at commit `2bff790`). Original guide: that project's `docs/GUIDE-HUD-ALPHA.fr.md`.
@@ -38,6 +44,10 @@ dlssg_for_sm86 treated `kBufferTypeAlpha` (34) as a game UI layer instead of `kB
 ```
 
 On by default, like `UIRecomposition=1` in dlssg_for_sm86. It stays inactive on Vulkan, with games that tag through `slSetTagForFrame`, and when the game provides these inputs itself. Check with NVIDIA's indicator (`DLSSG_IndicatorText=2` in `HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore`): it should show "Hudless: Yes · UIAlpha: Yes · UIR: ON".
+
+For copy/barrier diagnosis, set `diagnostics.logHudUi` to `true` in the JSON
+or use **Log HUD/UI** in the ReShade panel. It applies live, traces only the
+first three game HUD-less copies, and is off by default.
 
 ## Log codes (`DLSSG-Transfusion.log`, "UI assist" prefix)
 

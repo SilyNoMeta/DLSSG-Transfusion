@@ -88,6 +88,7 @@ Older files, including the flat `// commented` layout of TonyJoaca's DLSSG-Trans
 - `"overlayShowUiRecomposition"`, `"overlayShowHudless"`, `"overlayShowUiAlpha"`, `"overlayShowVersions"`: extra overlay lines showing whether UI recomposition is on, where the HUD-less scene and the UI alpha come from (game, UI assist capture/injection, or none), and the DLSS / DLSS-G / Streamline versions loaded by the game.
 - `"autoUiRecomposition"`: `true` (default) turns DLSS-G UI recomposition on when the game tags HUD-less and UI buffers without asking for it; `false` follows the game's own choice. Try `false` if generated frames are badly distorted in a game that tags those buffers. DOOM: The Dark Ages is recognized and always follows its own choice (forcing UIR there distorts every generated frame in motion). `"forceUiRecomposition"` still forces it.
 - `"overlayShowFramePacing"`, `"overlayShowGpu"`, `"overlayShowVram"`, `"overlayShowDebug"`: extra overlay lines with the displayed frame time (average, 99th percentile, jitter), GPU load/temperature/power/clocks and VRAM used/total (read from the NVIDIA driver through NVML), and a debug line (mode, generated-frame ceiling, Dynamic pacer hook, last Streamline result, patch route). All extra lines are off by default.
+- `"logHudUi"` under `"diagnostics"`: trace the first three game-provided HUD-less copies and their D3D12 barrier steps. Off by default; applies live and is also available in the ReShade panel as **Log HUD/UI**.
 
 ### DLSS Super Resolution render resolution
 

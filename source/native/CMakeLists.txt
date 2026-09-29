@@ -2,8 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 project(DLSSGTransfusionNative LANGUAGES C CXX ASM_MASM RC)
 
 # Release identity: DLL version resources and the first log lines.
-set(TRANSFUSION_VERSION "1.4.5.1-rtx20-30-40")
-set(TRANSFUSION_VERSION_NUMERIC "1,4,5,1")
+set(TRANSFUSION_VERSION "1.4.5.2-rtx20-30-40")
+set(TRANSFUSION_VERSION_NUMERIC "1,4,5,2")
 set(TRANSFUSION_COMPANY "SilyNoMeta")
 set(TRANSFUSION_DESCRIPTION "DLSSG-Transfusion for RTX 20, 30 and 40")
 

@@ -305,6 +305,7 @@ std::atomic<bool> gIsEndfield{false};
 std::atomic<bool> gIsDoomTheDarkAges{false};
 std::atomic<bool> gConfigLogPerformance{false};
 std::atomic<bool> gConfigLogMotionTracing{false};
+std::atomic<bool> gConfigLogHudUi{false};
 std::atomic<bool> gConfigDisableKeybinds{false};
 // mode="game": the game (or NVIDIA Profile Inspector) chooses the multiplier.
 std::atomic<bool> gConfigGameMode{true};  // default: the game decides
@@ -1308,6 +1309,8 @@ std::string BuildControlJson(const ControlConfig& control)
                 "Write FPS and frame times to DLSSG-Transfusion_perf.csv."},
             {"logMotionTracing", boolean(gConfigLogMotionTracing.load(relaxed)),
                 "Very verbose motion-vector diagnostics, for debugging only."},
+            {"logHudUi", boolean(gConfigLogHudUi.load(relaxed)),
+                "Trace the first three game HUD-less copies and D3D12 barrier steps. Applied live."},
         }},
     };
     {
@@ -1566,6 +1569,15 @@ bool TryParseControl(const char* data, size_t size, ControlConfig& control,
         && TryParseBoolean(content, "logMotionTracing", logMotionTracing);
     if (hasMotionTracing) gConfigLogMotionTracing.store(logMotionTracing, std::memory_order_relaxed);
     else if (missingKeys) missingKeys->push_back("logMotionTracing");
+
+    size_t hudUiTraceOffset = 0;
+    bool logHudUi = gConfigLogHudUi.load(std::memory_order_relaxed);
+    if (FindJsonValue(content, "logHudUi", hudUiTraceOffset) && TryParseBoolean(content, "logHudUi", logHudUi))
+    {
+        gConfigLogHudUi.store(logHudUi, std::memory_order_relaxed);
+        hud_assist::SetLogHudUi(logHudUi);
+    }
+    else if (missingKeys) missingKeys->push_back("logHudUi");
 
     gpu_arch::Family gpuArchitecture = gConfigGpuArchitecture.load(std::memory_order_relaxed);
     if (TryParseGpuArchitecture(content, gpuArchitecture))
@@ -5964,7 +5976,7 @@ DWORD WINAPI PatchWorker(void* context)
     FILETIME configWriteTime{};
     ReadLastWriteTime(gConfigPath, configWriteTime);
     Log(L"Initial control: mode=%s multiplier=%ux disableKeybinds=%d dynamicTarget=%u FPS "
-        L"dynamicExperimental56=%d blackwellTransfusion=%d disableMenuDetection=%d disableMvDilation=%d forceUiRecomposition=%d logPerformance=%d logMotionTracing=%d; config: %s",
+        L"dynamicExperimental56=%d blackwellTransfusion=%d disableMenuDetection=%d disableMvDilation=%d forceUiRecomposition=%d logPerformance=%d logMotionTracing=%d logHudUi=%d; config: %s",
         ControlModeName(initialControl), initialControl.multiplier,
         gConfigDisableKeybinds.load(std::memory_order_relaxed) ? 1 : 0,
         initialControl.dynamicTargetFrameRate, initialControl.dynamicExperimental56,
@@ -5974,6 +5986,7 @@ DWORD WINAPI PatchWorker(void* context)
         gConfigForceUiRecomposition.load(std::memory_order_relaxed),
         gConfigLogPerformance.load(std::memory_order_relaxed),
         gConfigLogMotionTracing.load(std::memory_order_relaxed),
+        gConfigLogHudUi.load(std::memory_order_relaxed),
         gConfigPath.c_str());
 
     Log(L"Patch worker started for PID %lu", static_cast<unsigned long>(pid));

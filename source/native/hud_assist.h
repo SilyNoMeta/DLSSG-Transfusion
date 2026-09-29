@@ -82,6 +82,13 @@ namespace hud_assist {
 // Set by Transfusion to its log; the codes below are listed in docs/HUD-ASSIST.fr.md.
 inline void (*g_log)(const char* text) = nullptr;
 inline void Message(const char* text) { if (g_log) g_log(text); }
+inline std::atomic_bool g_log_hud_ui{false};
+inline std::atomic<uint32_t> g_game_hudless_trace_count{0};
+inline void SetLogHudUi(bool enabled) {
+  if (enabled && !g_log_hud_ui.load(std::memory_order_relaxed))
+    g_game_hudless_trace_count.store(0, std::memory_order_relaxed);
+  g_log_hud_ui.store(enabled, std::memory_order_relaxed);
+}
 
 // Set once by the runtime: false for Vulkan, where a tag's native handle is a
 // VkImage rather than an ID3D12Resource.
@@ -325,6 +332,12 @@ inline ID3D12Resource* g_copy = nullptr;
 inline D3D12_RESOURCE_DESC g_copy_desc{};
 inline std::vector<std::pair<ID3D12Resource*, uint64_t>> g_retired;
 
+inline void TraceGameHudless(uint32_t attempt, const char* step) {
+  std::stringstream s;
+  s << "UI assist TRACE game-hudless #" << attempt << ' ' << step;
+  Message(s.str().c_str());
+}
+
 inline ID3D12Resource* CopyTarget(ID3D12Resource* source, const D3D12_RESOURCE_DESC& desc) {
   if (g_copy && g_copy_desc.Width == desc.Width && g_copy_desc.Height == desc.Height &&
       g_copy_desc.Format == desc.Format)
@@ -416,17 +429,42 @@ inline void CopyGameHudless(ID3D12GraphicsCommandList* list, ID3D12Resource* sou
   const D3D12_RESOURCE_DESC desc = source->GetDesc();
   if (!SingleSubresource2D(desc)) return;
   const auto declared = static_cast<D3D12_RESOURCE_STATES>(state);
+  const uint32_t attempt = g_log_hud_ui.load(std::memory_order_relaxed)
+      ? g_game_hudless_trace_count.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+  const bool trace = attempt != 0 && attempt <= 3;
+  if (trace) {
+    std::stringstream s;
+    s << "UI assist TRACE game-hudless #" << attempt << " G0 enter list=" << list
+      << " source=" << source << " declaredState=0x" << std::hex << state
+      << std::dec << " size=" << desc.Width << 'x' << desc.Height
+      << " format=" << static_cast<unsigned>(desc.Format)
+      << " flags=0x" << std::hex << static_cast<unsigned>(desc.Flags);
+    Message(s.str().c_str());
+  }
   t_inside = true;
   AcquireSRWLockExclusive(&g_copy_lock);
+  if (trace) TraceGameHudless(attempt, "G1 lock acquired; before CopyTarget");
   if (ID3D12Resource* copy = CopyTarget(source, desc)) {
-    if (declared != D3D12_RESOURCE_STATE_COPY_SOURCE)
+    if (trace) TraceGameHudless(attempt, "G2 CopyTarget returned; before source transition");
+    if (declared != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+      if (trace) TraceGameHudless(attempt, "G3 before source barrier to COPY_SOURCE");
       Barrier(list, source, declared, D3D12_RESOURCE_STATE_COPY_SOURCE);
+      if (trace) TraceGameHudless(attempt, "G4 source barrier to COPY_SOURCE returned");
+    }
+    if (trace) TraceGameHudless(attempt, "G5 before CopyResource");
     list->CopyResource(copy, source);
-    if (declared != D3D12_RESOURCE_STATE_COPY_SOURCE)
+    if (trace) TraceGameHudless(attempt, "G6 CopyResource returned");
+    if (declared != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+      if (trace) TraceGameHudless(attempt, "G7 before source barrier restore");
       Barrier(list, source, D3D12_RESOURCE_STATE_COPY_SOURCE, declared);
+      if (trace) TraceGameHudless(attempt, "G8 source barrier restore returned");
+    }
     g_hudless_copy_tick.store(GetTickCount64(), std::memory_order_relaxed);
+    if (trace) TraceGameHudless(attempt, "G9 before retired-resource release");
     ReleaseRetired(g_captures.fetch_add(1) + 1);
+    if (trace) TraceGameHudless(attempt, "G10 retired-resource release returned");
   }
+  else if (trace) TraceGameHudless(attempt, "G2 CopyTarget failed");
   ReleaseSRWLockExclusive(&g_copy_lock);
   t_inside = false;
 }
@@ -1040,6 +1078,17 @@ inline void ObserveGameTags(uint32_t viewport, const sl::ResourceTag* tags, uint
   g_allowed.store(allowed && g_d3d12.load(std::memory_order_relaxed) && !frame_based, std::memory_order_relaxed);
   if (frame_based) g_frame_based_tags.store(true, std::memory_order_relaxed);
   if (!g_d3d12.load(std::memory_order_relaxed) || internal::t_inside || !tags) return;
+  // A game can put HUD-less before its own UI layer in one slSetTag batch.
+  // Decide whether we need a copy only after checking the whole batch.
+  bool batch_has_ui = false;
+  for (uint32_t i = 0; i < count; ++i) {
+    const auto& t = tags[i];
+    if ((t.type == sl::kBufferTypeUIColorAndAlpha || t.type == sl::kBufferTypeUIAlpha) &&
+        t.resource && t.resource->native) {
+      batch_has_ui = true;
+      break;
+    }
+  }
   ID3D12Resource* resource = nullptr;
   bool depth = false;
   for (uint32_t i = 0; i < count; ++i) {
@@ -1049,7 +1098,7 @@ inline void ObserveGameTags(uint32_t viewport, const sl::ResourceTag* tags, uint
       g_game_hudless_tick.store(GetTickCount64(), std::memory_order_relaxed);
       internal::LogOnce(internal::g_logged_game_hudless,
                         "UI assist A0.");
-      if (allowed && !frame_based && !GameProvidesUi())
+      if (allowed && !frame_based && !batch_has_ui && !GameProvidesUi())
         internal::CopyGameHudless(reinterpret_cast<ID3D12GraphicsCommandList*>(list),
                                   static_cast<ID3D12Resource*>(t.resource->native), t.resource->state);
     }

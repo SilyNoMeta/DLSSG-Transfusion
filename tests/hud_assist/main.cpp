@@ -8,9 +8,11 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 #include "hud_assist.h"
 
@@ -23,6 +25,8 @@ struct TagRecord {
   void* native = nullptr;
 };
 static TagRecord hudless_tags, ui_tags;
+static std::vector<std::string> hud_ui_messages;
+static void RecordHudUiMessage(const char* message) { hud_ui_messages.emplace_back(message); }
 static bool Submit(uint32_t viewport, const sl::ResourceTag& tag, sl::CommandBuffer*) {
   auto& r = tag.type == sl::kBufferTypeUIColorAndAlpha ? ui_tags : hudless_tags;
   CHECK(tag.type == sl::kBufferTypeUIColorAndAlpha || tag.type == sl::kBufferTypeHUDLessColor);
@@ -364,7 +368,19 @@ int main() {
     const float green[4] = {0, 1, 0, 1};
     gpu.device->CreateRenderTargetView(s.finished, nullptr, gpu.Rtv(2));
     gpu.list->ClearRenderTargetView(gpu.Rtv(2), green, 0, nullptr);
+    CHECK(!hl::g_log_hud_ui.load());
+    hl::g_log = &RecordHudUiMessage;
+    hl::SetLogHudUi(true);
     GameTags(sl::kBufferTypeHUDLessColor, s.finished, D3D12_RESOURCE_STATE_RENDER_TARGET, gpu.list);
+    CHECK(hl::g_game_hudless_trace_count.load() == 1);
+    CHECK(std::any_of(hud_ui_messages.begin(), hud_ui_messages.end(), [](const std::string& line) {
+      return line.find("TRACE game-hudless #1 G0") != std::string::npos;
+    }));
+    CHECK(std::any_of(hud_ui_messages.begin(), hud_ui_messages.end(), [](const std::string& line) {
+      return line.find("TRACE game-hudless #1 G10") != std::string::npos;
+    }));
+    hl::SetLogHudUi(false);
+    hl::g_log = nullptr;
     CHECK(hl::GameProvidesHudless());
     CHECK(hl::Recent(hl::g_hudless_copy_tick, hl::kHudlessFreshMs));  // the game's scene was copied
     Scene game = s;
@@ -380,6 +396,23 @@ int main() {
 
   // 9. The game's own UI layer has priority, and disallowed modes tag nothing.
   {
+    // A game may supply HUD-less before UI in the same batch. The old
+    // single-pass path copied immediately and could crash in ResourceBarrier
+    // before it reached the UI tag.
+    for (const auto ui_type : {sl::kBufferTypeUIColorAndAlpha, sl::kBufferTypeUIAlpha}) {
+      hl::g_game_ui_tick = 0;
+      hl::g_hudless_copy_tick = 0;
+      sl::Resource hudless(sl::ResourceType::eTex2d, s.finished, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      sl::Resource ui(sl::ResourceType::eTex2d, s.other, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      const sl::ResourceTag tags[] = {
+          {&hudless, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow},
+          {&ui, ui_type, sl::ResourceLifecycle::eOnlyValidNow}};
+      hl::ObserveGameTags(0, tags, 2, true, false, reinterpret_cast<sl::CommandBuffer*>(gpu.list));
+      CHECK(hl::GameProvidesHudless() && hl::GameProvidesUi());
+      CHECK(!hl::Recent(hl::g_hudless_copy_tick, hl::kHudlessFreshMs));
+    }
+    hl::g_game_hudless_tick = 0;
+    hl::g_game_ui_tick = 0;
     const unsigned ui_before = ui_tags.calls;
     GameTags(sl::kBufferTypeUIColorAndAlpha, s.other, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
     CHECK(hl::GameProvidesUi());
