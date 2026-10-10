@@ -110,7 +110,7 @@ Open 的性能键位于此独立分组。请先在菜单中选择引擎和适合
 | 键 | 默认 | 值 |
 | :--- | :---: | :--- |
 | `logPerformance` | `false` | 将帧率和帧时间写入 `rtx-encore-logs` 中的 CSV 文件 |
-| `logFilesKept` | `3` | 保留的会话日志数，`1` 至 `100` |
+| `logFilesKept` | `3` | 保留的常规日志数及同等数量的异常日志，`1` 至 `100` |
 
 ### `keyboardShortcuts`
 

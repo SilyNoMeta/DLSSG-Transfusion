@@ -7,13 +7,13 @@ Smooth Motion 和 Neural Rendering。**
 
 只需把一个文件放在游戏旁边，自带菜单，无需安装其他任何东西。
 
-[![最新版本](https://img.shields.io/github/v/release/SilyNoMeta/rtx-encore?style=for-the-badge&label=Latest&color=76b900)](https://github.com/SilyNoMeta/rtx-encore/releases/latest)
+[![最新版本](https://img.shields.io/github/v/release/SilyNoMeta/rtx-encore?include_prereleases&style=for-the-badge&label=Latest&color=76b900)](https://github.com/SilyNoMeta/rtx-encore/releases)
 [![下载量](https://img.shields.io/github/downloads/SilyNoMeta/rtx-encore/total?style=for-the-badge&color=2f81f7)](https://github.com/SilyNoMeta/rtx-encore/releases)
 
 [![显卡](https://img.shields.io/badge/GPUs-RTX%2020%20%7C%2030%20%7C%2040-76b900?style=flat-square&logo=nvidia&logoColor=white)](docs/COMPATIBILITY.zh-CN.md)
 [![图形 API](https://img.shields.io/badge/APIs-DirectX%2011%20%7C%2012%20%7C%20Vulkan-0078d4?style=flat-square)](docs/COMPATIBILITY.zh-CN.md)
 
-**[下载](https://github.com/SilyNoMeta/rtx-encore/releases/latest)** ·
+**[下载](https://github.com/SilyNoMeta/rtx-encore/releases)** ·
 **[安装](docs/INSTALLATION.zh-CN.md)** ·
 **[English](README.md)** ·
 **[Français](README.fr.md)**
@@ -65,7 +65,7 @@ RTX Encore 面向 RTX 20、30 和 40；RTX 50 显卡的帧生成和 Smooth Motio
 
 ## 快速开始
 
-1. 下载 **[最新版本](https://github.com/SilyNoMeta/rtx-encore/releases/latest)** 并解压。
+1. 下载 **[最新版本](https://github.com/SilyNoMeta/rtx-encore/releases)** 并解压。
 2. 把 `rtx-encore.dll` 复制到游戏可执行文件旁边，并重命名为 `version.dll`。
 3. 启动游戏。首次启动时菜单会自动打开一次；按 **Insert** 可再次打开。
 4. 在游戏设置中开启 DLSS 帧生成。如果之前已经开启，请先关闭再重新开启。

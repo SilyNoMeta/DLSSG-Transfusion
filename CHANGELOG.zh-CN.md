@@ -2,7 +2,26 @@
 
 *[English](CHANGELOG.md) · [Français](CHANGELOG.fr.md)*
 
-## 1.0.0
+## 1.0.0-beta.3 — 预发布版本
+
+- 修正 The Last of Us 中 RTX Encore、OptiScaler 与游戏旧版 Streamline 同时使用时发现的启动崩溃原因。尚待游戏内确认；Dead Space 的情况仍未确认。
+- 正确检测 DLSS Ray Reconstruction 活动。NR 缺少兼容深度输入时会说明原因，不再掩盖 DLSS 活动；兼容性仍取决于游戏提供的数据。
+- 为每个进程和启动分别保存异常日志，避免错误报告程序覆盖游戏的诊断数据。这有助于调查 Cyberpunk 的启动崩溃，但不代表该崩溃已修复。
+
+- 修复启用内置菜单时，在 Starfield 中开启帧生成导致的崩溃。
+  初始测试版本已在游戏中确认正常，包括关闭/重新开启帧生成以及打开菜单。
+  最终变体还修正了对象生命周期和诊断功能，并通过了 Windows 自动化测试；尚未对该变体单独进行游戏内复测。
+- 限制可选图形跟踪的日志数量，并避免记录已加载模块时产生诊断异常。
+
+### 致谢
+
+- 感谢 [@mennogreg](https://github.com/mennogreg) 提供 Starfield 的问题报告、日志和多次游戏内测试（[#13](https://github.com/SilyNoMeta/rtx-encore/issues/13)），以及 OptiScaler 兼容性问题的报告和日志（[#20](https://github.com/SilyNoMeta/rtx-encore/issues/20)）。
+- 感谢 [@hunan-NRT](https://github.com/hunan-NRT) 报告 Ray Reconstruction 检测问题，并感谢 @mennogreg 确认同类现象（[#14](https://github.com/SilyNoMeta/rtx-encore/issues/14)）。
+- 感谢 [@naruto490610-alt](https://github.com/naruto490610-alt) 提供 Cyberpunk 报告和日志，帮助发现异常日志缺少进程隔离的问题（[#17](https://github.com/SilyNoMeta/rtx-encore/issues/17)）。
+
+也感谢所有分享问题报告和日志、帮助调查其余问题的用户。
+
+## 1.0.0-beta.2 — 预发布版本
 
 以 **RTX Encore** 名称发布的首个版本。版本号重新从 1.0.0 开始：此版本接替并取代以 DLSSG-Transfusion
 名称发布的 `v1.4.5.3-rtx20-30-40`。

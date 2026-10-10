@@ -84,3 +84,5 @@ lorsque la fenêtre du jeu a le focus.
 Les journaux de session sont écrits dans le dossier `rtx-encore-logs` à côté du fichier du mod ; les trois plus
 récents sont conservés (**Session logs kept**, 1 à 100). **Log performance** écrit la fréquence et les temps d'image
 de la session dans un fichier CSV du même dossier.
+
+Les journaux d’exception sont conservés séparément, en même nombre. Chaque processus a son fichier ; les journaux encore utilisés sont conservés.

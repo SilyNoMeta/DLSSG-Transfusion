@@ -115,7 +115,7 @@ indépendant de `nrOpenUltraFast` et de `dlssRenderScale` ; ces réglages ne s'a
 | Clé | Défaut | Valeurs |
 | :--- | :---: | :--- |
 | `logPerformance` | `false` | Écrit la fréquence et les temps d'image dans un fichier CSV de `rtx-encore-logs` |
-| `logFilesKept` | `3` | Journaux de session conservés, `1` à `100` |
+| `logFilesKept` | `3` | Journaux normaux conservés, plus autant de journaux d’exception, `1` à `100` |
 
 ### `keyboardShortcuts`
 

@@ -114,7 +114,7 @@ the menu first; these keys do not turn Open on by themselves.
 | Key | Default | Values |
 | :--- | :---: | :--- |
 | `logPerformance` | `false` | Writes frame rate and frame times to a CSV file in `rtx-encore-logs` |
-| `logFilesKept` | `3` | Session logs kept, `1` to `100` |
+| `logFilesKept` | `3` | Regular logs kept, plus the same number of exception logs, `1` to `100` |
 
 ### `keyboardShortcuts`
 

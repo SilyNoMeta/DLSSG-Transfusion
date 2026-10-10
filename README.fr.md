@@ -7,13 +7,13 @@ pour les GeForce RTX 20, RTX 30 et RTX 40.**
 
 Un seul fichier à côté du jeu, un menu intégré, rien d'autre à installer.
 
-[![Dernière version](https://img.shields.io/github/v/release/SilyNoMeta/rtx-encore?style=for-the-badge&label=Version&color=76b900)](https://github.com/SilyNoMeta/rtx-encore/releases/latest)
+[![Dernière version](https://img.shields.io/github/v/release/SilyNoMeta/rtx-encore?include_prereleases&style=for-the-badge&label=Version&color=76b900)](https://github.com/SilyNoMeta/rtx-encore/releases)
 [![Téléchargements](https://img.shields.io/github/downloads/SilyNoMeta/rtx-encore/total?style=for-the-badge&label=T%C3%A9l%C3%A9chargements&color=2f81f7)](https://github.com/SilyNoMeta/rtx-encore/releases)
 
 [![Cartes](https://img.shields.io/badge/Cartes-RTX%2020%20%7C%2030%20%7C%2040-76b900?style=flat-square&logo=nvidia&logoColor=white)](docs/COMPATIBILITY.fr.md)
 [![API graphiques](https://img.shields.io/badge/API-DirectX%2011%20%7C%2012%20%7C%20Vulkan-0078d4?style=flat-square)](docs/COMPATIBILITY.fr.md)
 
-**[Télécharger](https://github.com/SilyNoMeta/rtx-encore/releases/latest)** ·
+**[Télécharger](https://github.com/SilyNoMeta/rtx-encore/releases)** ·
 **[Installation](docs/INSTALLATION.fr.md)** ·
 **[English](README.md)** ·
 **[中文](README.zh-CN.md)**
@@ -69,7 +69,7 @@ NVIDIA. Détails, API graphiques, pilotes et notes par jeu : **[Compatibilité](
 
 ## Démarrage rapide
 
-1. Téléchargez la **[dernière version](https://github.com/SilyNoMeta/rtx-encore/releases/latest)** et extrayez-la.
+1. Téléchargez la **[dernière version](https://github.com/SilyNoMeta/rtx-encore/releases)** et extrayez-la.
 2. Copiez `rtx-encore.dll` à côté de l'exécutable du jeu et renommez-le `version.dll`.
 3. Lancez le jeu. Le menu s'ouvre une fois au premier lancement ; **Inser** le rouvre.
 4. Activez DLSS Frame Generation dans les réglages du jeu. S'il l'était déjà, désactivez-le puis réactivez-le.
