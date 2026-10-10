@@ -75,3 +75,5 @@ RTX Encore 在 DirectX 11、DirectX 12 和 Vulkan 游戏中绘制自己的菜单
 
 会话日志写入模组文件旁边的 `rtx-encore-logs` 文件夹；默认保留最近三份（**Session logs kept**，1 至 100）。
 **Log performance** 将本次会话的帧率和帧时间写入同一文件夹中的 CSV 文件。
+
+异常日志单独保留，数量与常规日志相同。每个进程使用独立文件；仍在使用的日志不会删除。

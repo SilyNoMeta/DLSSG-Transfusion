@@ -2,7 +2,26 @@
 
 *[English](CHANGELOG.md) · [中文](CHANGELOG.zh-CN.md)*
 
-## 1.0.0
+## 1.0.0-beta.3 — préversion
+
+- Correction du crash de démarrage identifié dans The Last of Us avec RTX Encore, OptiScaler et l'ancien runtime Streamline du jeu. Confirmation en jeu attendue ; le cas de Dead Space reste à confirmer.
+- Détection correcte de l'activité DLSS Ray Reconstruction. NR indique lorsqu'une profondeur compatible manque, sans masquer l'activité DLSS ; sa compatibilité dépend encore des données du jeu.
+- Journaux d'exception distincts pour chaque processus et lancement, afin qu'un rapporteur d'erreur ne remplace pas les données du jeu. Cela améliore l'analyse du crash de démarrage signalé dans Cyberpunk, sans en établir la correction.
+
+- Correction d'un crash de Starfield lors de l'activation de la Frame Generation avec le menu intégré.
+  Le build de test initial a été confirmé fonctionnel en jeu, y compris FG désactivée/réactivée et ouverture du menu.
+  La variante finale ajoute des corrections de durée de vie et de diagnostic et passe les tests automatisés Windows ; elle n'a pas reçu de nouvel essai en jeu.
+- Limitation de la trace graphique facultative et suppression des exceptions de diagnostic lors du relevé des modules chargés.
+
+### Remerciements
+
+- [@mennogreg](https://github.com/mennogreg) pour les signalements, les logs et les nombreux essais en jeu sur Starfield ([#13](https://github.com/SilyNoMeta/rtx-encore/issues/13)), ainsi que le signalement de compatibilité OptiScaler et ses logs ([#20](https://github.com/SilyNoMeta/rtx-encore/issues/20)).
+- [@hunan-NRT](https://github.com/hunan-NRT), avec confirmation de @mennogreg, pour le signalement du problème de détection de Ray Reconstruction ([#14](https://github.com/SilyNoMeta/rtx-encore/issues/14)).
+- [@naruto490610-alt](https://github.com/naruto490610-alt) pour le rapport Cyberpunk et les logs qui ont révélé le défaut d’isolation des journaux d’exception ([#17](https://github.com/SilyNoMeta/rtx-encore/issues/17)).
+
+Merci également à toutes les personnes qui partagent leurs rapports et logs pour aider à analyser les problèmes restants.
+
+## 1.0.0-beta.2 — préversion
 
 Première version sous le nom **RTX Encore**. La numérotation repart à 1.0.0 : cette version succède à
 `v1.4.5.3-rtx20-30-40`, publiée sous le nom DLSSG-Transfusion, et la remplace.

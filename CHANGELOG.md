@@ -2,7 +2,26 @@
 
 *[Français](CHANGELOG.fr.md) · [中文](CHANGELOG.zh-CN.md)*
 
-## 1.0.0
+## 1.0.0-beta.3 — pre-release
+
+- Address a startup crash identified in The Last of Us when using RTX Encore with OptiScaler and the game's older Streamline runtime. In-game confirmation is pending; Dead Space remains unconfirmed.
+- Detect DLSS Ray Reconstruction activity correctly. NR reports when its required depth input is unavailable instead of hiding DLSS activity; compatibility still depends on the game's inputs.
+- Keep separate exception logs for each process and launch, so an error reporter cannot replace the game's diagnostic data. This improves investigation of the Cyberpunk startup report; it does not establish a fix for that crash.
+
+- Fix a Starfield crash when enabling Frame Generation with the built-in menu present.
+  The initial test build was confirmed working in-game, including FG off/on and opening the menu.
+  The final variant adds lifetime and diagnostic corrections and passes automated Windows tests; it has not received a separate in-game retest.
+- Bound the optional graphics trace and avoid diagnostic exceptions while recording loaded modules.
+
+### Thanks
+
+- [@mennogreg](https://github.com/mennogreg) for the Starfield reports, logs and repeated in-game tests ([#13](https://github.com/SilyNoMeta/rtx-encore/issues/13)), and the OptiScaler compatibility report and logs ([#20](https://github.com/SilyNoMeta/rtx-encore/issues/20)).
+- [@hunan-NRT](https://github.com/hunan-NRT), with confirmation from @mennogreg, for reporting the Ray Reconstruction detection problem ([#14](https://github.com/SilyNoMeta/rtx-encore/issues/14)).
+- [@naruto490610-alt](https://github.com/naruto490610-alt) for the Cyberpunk report and logs that exposed the exception-log isolation problem ([#17](https://github.com/SilyNoMeta/rtx-encore/issues/17)).
+
+Thanks also to everyone sharing reports and logs to help investigate the remaining issues.
+
+## 1.0.0-beta.2 — pre-release
 
 First release under the name **RTX Encore**. Version numbers start again at 1.0.0: this release follows
 `v1.4.5.3-rtx20-30-40`, published as DLSSG-Transfusion, and replaces it.

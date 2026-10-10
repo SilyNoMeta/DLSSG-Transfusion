@@ -81,3 +81,5 @@ given several key combinations or none. Shortcuts only act while the game window
 Session logs are written in the `rtx-encore-logs` folder beside the mod's file; the three most recent are kept
 (**Session logs kept**, 1 to 100). **Log performance** writes the frame rate and frame times of the session to a CSV
 file in the same folder.
+
+Exception logs are kept separately, with the same count. Each process has its own file; logs still in use are preserved.

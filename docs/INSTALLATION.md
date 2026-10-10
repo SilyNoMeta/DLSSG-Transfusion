@@ -58,7 +58,7 @@ renaming the DLL.
 ### What appears next to the mod
 
 - `rtx-encore.jsonc`: your settings, created on first launch. See [Settings file](SETTINGS.md).
-- `rtx-encore-logs\`: the session logs, the three most recent by default.
+- `rtx-encore-logs\`: the session logs, the three most recent by default, plus up to three exception logs. Files still in use are preserved.
 
 ## Update
 
